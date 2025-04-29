@@ -27,7 +27,7 @@
    )* }}} *)
 
 type t =
-  | Arrow of t * t
+  | Arrow of { label : string option; ty : t * t }
   | Tycon of string * t list
   | Tuple of t list
   | Tyvar of string

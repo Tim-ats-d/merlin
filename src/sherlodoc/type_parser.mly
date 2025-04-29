@@ -1,6 +1,6 @@
 %token EOF
 %token PARENS_OPEN PARENS_CLOSE
-%token ARROW COMMA WILDCARD STAR
+%token ARROW COMMA WILDCARD STAR COLON QUESTION_MARK
 %token<string> WORD
 %token<string> POLY
 
@@ -15,7 +15,9 @@ main:
 
 typ:
   | t=typ2 { t }
-  | a=typ2 ARROW b=typ { Type_parsed.Arrow (a, b) }
+  | a=typ2 ARROW b=typ { Type_parsed.Arrow { label = None; ty = (a, b) } }
+  | w=WORD COLON a=typ2 ARROW b=typ
+  | QUESTION_MARK w=WORD COLON a=typ2 ARROW b=typ { Type_parsed.Arrow { label = Some w; ty = (a, b) } }
 ;
 
 typ2:

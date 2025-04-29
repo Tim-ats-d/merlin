@@ -10,6 +10,8 @@ rule token = parse
 | "," { COMMA }
 | '_' { WILDCARD }
 | '*' { STAR }
+| ':' { COLON }
+| '?' { QUESTION_MARK }
 | "'" (['a'-'z' 'A'-'Z' '0'-'9' '\'' '_']* as p) { POLY p }
 | ['a'-'z' 'A'-'Z' '0'-'9' '\'' '_' '.']+ as w { WORD w }
 | eof { EOF }

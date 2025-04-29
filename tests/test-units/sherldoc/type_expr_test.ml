@@ -1,5 +1,9 @@
 open Merlin_sherlodoc
 
+module Helper = struct
+  let arrow ?label a b = Type_expr.Arrow { label; ty = (a, b) }
+end
+
 let type_testable =
   let pp ppf x = Format.fprintf ppf "%s" (Type_expr.to_string x) in
   Alcotest.testable pp Type_expr.equal
@@ -22,12 +26,11 @@ let test_parse_simple_type_3 =
   let open Alcotest in
   test_case "parse a simple type expression - 3" `Quick (fun () ->
       let expected =
+        let open Helper in
         Some
-          Type_expr.(
-            Arrow
-              ( Arrow (Tyvar 0, Tyvar 1),
-                Arrow (Tycon ("list", [ Tyvar 0 ]), Tycon ("list", [ Tyvar 1 ]))
-              ))
+          (arrow
+             (arrow (Tyvar 0) (Tyvar 1))
+             (arrow (Tycon ("list", [ Tyvar 0 ])) (Tycon ("list", [ Tyvar 1 ]))))
       and computed = Type_expr.from_string "('a -> 'b) -> 'a list -> 'b list" in
       check (option type_testable) "should be the map function" expected
         computed)
@@ -35,7 +38,9 @@ let test_parse_simple_type_3 =
 let test_parse_simple_type_4 =
   let open Alcotest in
   test_case "parse a simple type expression - 4" `Quick (fun () ->
-      let expected = Some Type_expr.(Arrow (Wildcard, Tycon ("Foo.bar", [])))
+      let expected =
+        let open Helper in
+        Some (arrow Wildcard (Tycon ("Foo.bar", [])))
       and computed = Type_expr.from_string "_ -> Foo.bar" in
       check (option type_testable) "should be a simple query" expected computed)
 
@@ -133,6 +138,38 @@ let test_long_poly_identifier_1 =
       in
       check (option string) "should be equal" expected computed)
 
+let test_labeled_args_1 =
+  let open Alcotest in
+  test_case "test labeled argument parsing - 1" `Quick (fun () ->
+      let expected =
+        let open Helper in
+        arrow ~label:"foo" (Tyvar 0)
+          (arrow ~label:"bar"
+             (Tycon ("int", []))
+             (arrow (Tyvar 1)
+                (arrow ~label:"foobar" (Tyvar 1)
+                   (arrow ~label:"barfoo"
+                      (Tycon ("list", [ Tycon ("string", []) ]))
+                      (Tyvar 2)))))
+      in
+      let computed =
+        Type_expr.from_string
+          "?foo:'a -> bar:int -> 'b -> foobar:'b -> barfoo:(string list) -> 'c"
+      in
+      check (option type_testable) "should be equal" (Some expected) computed)
+
+let test_labeled_args_2 =
+  let open Alcotest in
+  test_case "test labeled argument parsing and pretty printing - 1" `Quick
+    (fun () ->
+      let expected = Some "cfg:config -> beep:'a -> bop:'b -> int" in
+      let computed =
+        "?cfg  :  config -> beep : 'abc -> ?bop:'b -> int"
+        |> Type_expr.from_string
+        |> Option.map Type_expr.to_string
+      in
+      check (option string) "should be equal" expected computed)
+
 let cases =
   ( "type_expr",
     [ test_parse_simple_type_1;
@@ -141,5 +178,7 @@ let cases =
       test_parse_simple_type_4;
       test_simple_isomorphismic_poly_function_1;
       test_poly_identifier_1;
-      test_long_poly_identifier_1
+      test_long_poly_identifier_1;
+      test_labeled_args_1;
+      test_labeled_args_2
     ] )

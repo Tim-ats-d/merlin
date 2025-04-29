@@ -27,7 +27,7 @@
    )* }}} *)
 
 type t =
-  | Arrow of t * t
+  | Arrow of { label : string option; ty : t * t }
   | Tycon of string * t list
   | Tuple of t list
   | Tyvar of int
@@ -40,8 +40,9 @@ let rec equal a b =
   | Tyvar a, Tyvar b -> Int.equal a b
   | Tuple a, Tuple b -> List.equal equal a b
   | Tycon (ka, a), Tycon (kb, b) -> String.equal ka kb && List.equal equal a b
-  | Arrow (ia, oa), Arrow (ib, ob) -> equal ia ib && equal oa ob
-  | Arrow (_, _), _
+  | Arrow { label = il; ty = ia, oa }, Arrow { label = ol; ty = ib, ob } ->
+    Option.equal String.equal il ol && equal ia ib && equal oa ob
+  | Arrow _, _
   | Tycon (_, _), _
   | Tuple _, _
   | Tyvar _, _
@@ -68,7 +69,9 @@ let rec to_string = function
   | Tycon (constr, [ x ]) -> with_parens x ^ " " ^ constr
   | Tycon (constr, xs) -> (xs |> as_list "" |> parens) ^ " " ^ constr
   | Tuple xs -> as_tuple "" xs
-  | Arrow (a, b) -> with_parens a ^ " -> " ^ to_string b
+  | Arrow { label = None; ty = a, b } -> with_parens a ^ " -> " ^ to_string b
+  | Arrow { label = Some label; ty = a, b } ->
+    label ^ ":" ^ with_parens a ^ " -> " ^ to_string b
 
 and with_parens = function
   | (Arrow _ | Tuple _) as t -> t |> to_string |> parens
@@ -105,10 +108,10 @@ let normalize_type_parameters ty =
   let rec aux i map = function
     | Type_parsed.Unhandled -> (i, map, Unhandled)
     | Type_parsed.Wildcard -> (i, map, Wildcard)
-    | Type_parsed.Arrow (a, b) ->
+    | Type_parsed.Arrow { label; ty = a, b } ->
       let i, map, a = aux i map a in
       let i, map, b = aux i map b in
-      (i, map, Arrow (a, b))
+      (i, map, Arrow { label; ty = (a, b) })
     | Type_parsed.Tycon (s, r) ->
       let i, map, r = map_with_state aux i map r in
       (i, map, Tycon (s, r))

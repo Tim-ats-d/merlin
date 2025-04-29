@@ -42,7 +42,7 @@ let make_path t =
     | Type_expr.Unhandled -> []
     | Type_expr.Wildcard -> [ Wildcard :: prefix ]
     | Type_expr.Tyvar x -> [ Tyvar x :: prefix ]
-    | Type_expr.Arrow (a, b) ->
+    | Type_expr.Arrow { ty = a, b; _ } ->
       List.rev_append
         (aux (Left_arrow :: prefix) a)
         (aux (Right_arrow :: prefix) b)

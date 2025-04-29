@@ -37,7 +37,10 @@ let sherlodoc_type_of env typ =
     | Types.Tvar None -> Type_parsed.Wildcard
     | Types.Tvar (Some ty) -> Type_parsed.Tyvar ty
     | Types.Ttuple elts -> Type_parsed.tuple @@ List.map ~f:aux elts
-    | Types.Tarrow (_, a, b, _) -> Type_parsed.Arrow (aux a, aux b)
+    | Types.Tarrow (Nolabel, a, b, _) ->
+      Type_parsed.Arrow { label = None; ty = (aux a, aux b) }
+    | Types.Tarrow (Asttypes.(Labelled label | Optional label), a, b, _) ->
+      Type_parsed.Arrow { label = Some label; ty = (aux a, aux b) }
     | Types.Tconstr (p, args, _) ->
       let p = Out_type.rewrite_double_underscore_paths env p in
       let name = Format.asprintf "%a" Printtyp.path p in
