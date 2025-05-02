@@ -40,5 +40,8 @@ let cases =
       expected_distance "('a -> 'a) -> 'a list -> 'a list"
         "('a -> 'b) -> 'a list -> 'b list" 2;
       expected_distance "'a -> 'b option -> 'a option"
-        "'b option -> 'a -> 'a option" 3
+        "'b option -> 'a -> 'a option" 3;
+      expected_distance "foo:a -> bar:b -> c" "a -> b -> c" 0;
+      expected_distance "a -> b -> c" "foo:a -> bar:b -> c" 0;
+      expected_distance "foo:a -> b -> c" "boo:a -> b -> c" 0
     ] )

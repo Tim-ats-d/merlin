@@ -162,10 +162,88 @@ let test_labeled_args_2 =
   let open Alcotest in
   test_case "test labeled argument parsing and pretty printing - 1" `Quick
     (fun () ->
-      let expected = Some "cfg:config -> beep:'a -> bop:'b -> int" in
+      let expected = Some "cfg:config -> beep:'a -> bop:'b -> int -> 'a" in
       let computed =
-        "?cfg  :  config -> beep : 'abc -> ?bop:'b -> int"
+        "?cfg  :  config -> beep : 'abc -> ?bop:'b -> int -> 'abc"
         |> Type_expr.from_string
+        |> Option.map Type_expr.to_string
+      in
+      check (option string) "should be equal" expected computed)
+
+let test_simple_isomorphismic_poly_object =
+  let open Alcotest in
+  test_case
+    "ensure that function equivalent function are parsed as the same function \
+     - 1"
+    `Quick (fun () ->
+      let expected = Some "< foo : 'a; bar : 'b >" in
+      let computed =
+        "< foo : 'foo; bar : 'bar ; >" |> Type_expr.from_string
+        |> Option.map Type_expr.to_string
+      in
+      check (option string) "should be equal" expected computed)
+
+let test_empty_object_parsing =
+  let open Alcotest in
+  test_case "ensure that empty object are parsed as the same function - 1"
+    `Quick (fun () ->
+      let expected = Some "< >" in
+      let computed =
+        "< >" |> Type_expr.from_string |> Option.map Type_expr.to_string
+      in
+      check (option string) "should be equal" expected computed)
+
+let test_non_trivial_object_parsing =
+  let open Alcotest in
+  test_case "ensure that non trivial object are parsed correctly - 1" `Quick
+    (fun () ->
+      let expected =
+        Some
+          "< foo : foo:'a -> 'b -> 'c list; bar : bar:'d -> < f : 'a -> 'd > \
+           -> unit >"
+      in
+      let computed =
+        "< foo : foo:'foo -> 'b -> ('bcd list)    ; bar : ?bar:'a -> < f : \
+         'foo -> 'a > -> unit  ; ..>" |> Type_expr.from_string
+        |> Option.map Type_expr.to_string
+      in
+      check (option string) "should be equal" expected computed)
+
+let test_poly_variant1 =
+  let open Alcotest in
+  test_case "ensure that simple polymorphic variant are parsed correcyly - 1"
+    `Quick (fun () ->
+      let expected = Some "[ `A | `B of t ]" in
+      let computed =
+        "[< `A | `B of t ]" |> Type_expr.from_string
+        |> Option.map Type_expr.to_string
+      in
+      check (option string) "should be equal" expected computed)
+
+let test_poly_variant2 =
+  let open Alcotest in
+  test_case "ensure that complex polymorphic variant are parsed correcyly - 2"
+    `Quick (fun () ->
+      let expected = Some "[ `left of 'a | `right of 'b ]" in
+      let computed =
+        "[> | `left of 'left | `right of 'right ]" |> Type_expr.from_string
+        |> Option.map Type_expr.to_string
+      in
+      check (option string) "should be equal" expected computed)
+
+let test_poly_variant3 =
+  let open Alcotest in
+  test_case
+    "ensure that complex expr type including polymorphic variant are parsed \
+     correcyly - 3"
+    `Quick (fun () ->
+      let expected =
+        Some
+          "[ `A of 'a | `B of int list | `C of 'b ] -> [ `Z of 'a * 'b ] -> 'b"
+      in
+      let computed =
+        "[< | `A of   'foo | `B   of int list | `C  of 'bar ] -> [> `Z of \
+         ('foo * 'bar)] -> 'bar" |> Type_expr.from_string
         |> Option.map Type_expr.to_string
       in
       check (option string) "should be equal" expected computed)
@@ -180,5 +258,11 @@ let cases =
       test_poly_identifier_1;
       test_long_poly_identifier_1;
       test_labeled_args_1;
-      test_labeled_args_2
+      test_labeled_args_2;
+      test_simple_isomorphismic_poly_object;
+      test_empty_object_parsing;
+      test_non_trivial_object_parsing;
+      test_poly_variant1;
+      test_poly_variant2;
+      test_poly_variant3
     ] )

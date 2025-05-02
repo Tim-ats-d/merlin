@@ -31,3 +31,18 @@
 (** [compute a b] calculates an approximation of the distance between [query]
     and [entry]. *)
 val compute : query:Type_expr.t -> entry:Type_expr.t -> int
+
+type step =
+  | Wildcard
+  | Tyname of string
+  | Tyvar of int
+  | Left_arrow
+  | Right_arrow
+  | Product of { position : int; length : int }
+  | Argument of { position : int; length : int }
+  | Label of string
+  | Object of (string * step list list) list
+  | Poly_variant of (string * step list list) list
+
+val pp : Format.formatter -> step -> unit
+val make_path : Type_expr.t -> step list list

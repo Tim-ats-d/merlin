@@ -30,6 +30,8 @@ type t =
   | Arrow of { label : string option; ty : t * t }
   | Tycon of string * t list
   | Tuple of t list
+  | Object of (string * t) list
+  | Poly_variant of (string * t option) list
   | Tyvar of int
   | Wildcard
   | Unhandled
@@ -38,6 +40,16 @@ let rec equal a b =
   match (a, b) with
   | Unhandled, Unhandled | Wildcard, Wildcard -> true
   | Tyvar a, Tyvar b -> Int.equal a b
+  | Poly_variant a, Poly_variant b ->
+    List.equal
+      (fun (method_name, typ) (method_name', typ') ->
+        String.equal method_name method_name' && Option.equal equal typ typ')
+      a b
+  | Object a, Object b ->
+    List.equal
+      (fun (method_name, typ) (method_name', typ') ->
+        String.equal method_name method_name' && equal typ typ')
+      a b
   | Tuple a, Tuple b -> List.equal equal a b
   | Tycon (ka, a), Tycon (kb, b) -> String.equal ka kb && List.equal equal a b
   | Arrow { label = il; ty = ia, oa }, Arrow { label = ol; ty = ib, ob } ->
@@ -45,6 +57,8 @@ let rec equal a b =
   | Arrow _, _
   | Tycon (_, _), _
   | Tuple _, _
+  | Poly_variant _, _
+  | Object _, _
   | Tyvar _, _
   | Wildcard, _
   | Unhandled, _ -> false
@@ -69,6 +83,9 @@ let rec to_string = function
   | Tycon (constr, [ x ]) -> with_parens x ^ " " ^ constr
   | Tycon (constr, xs) -> (xs |> as_list "" |> parens) ^ " " ^ constr
   | Tuple xs -> as_tuple "" xs
+  | Poly_variant cs -> "[ " ^ as_poylvar "" cs ^ " ]"
+  | Object [] -> "< >"
+  | Object methods -> "< " ^ as_object "" methods ^ " >"
   | Arrow { label = None; ty = a, b } -> with_parens a ^ " -> " ^ to_string b
   | Arrow { label = Some label; ty = a, b } ->
     label ^ ":" ^ with_parens a ^ " -> " ^ to_string b
@@ -91,6 +108,27 @@ and as_tuple acc = function
     let acc = acc ^ with_parens x ^ " * " in
     as_tuple acc xs
 
+and as_object acc =
+  let fmt_method (name, typ) = name ^ " : " ^ to_string typ in
+  function
+  | [] -> acc
+  | [ meth ] -> acc ^ fmt_method meth
+  | meth :: xs ->
+    let acc = acc ^ fmt_method meth ^ "; " in
+    as_object acc xs
+
+and as_poylvar acc =
+  let fmt_constr (name, typ_opt) =
+    "`" ^ name
+    ^ Option.fold typ_opt ~none:"" ~some:(fun typ -> " of " ^ to_string typ)
+  in
+  function
+  | [] -> acc
+  | [ constr ] -> acc ^ fmt_constr constr
+  | constr :: xs ->
+    let acc = acc ^ fmt_constr constr ^ " | " in
+    as_poylvar acc xs
+
 module SMap = Map.Make (String)
 
 let map_with_state f i map list =
@@ -104,6 +142,22 @@ let map_with_state f i map list =
   in
   (i, map, List.rev r)
 
+let map_snd_pair_with_state f i map list =
+  map_with_state
+    (fun i map (x, y) ->
+      let i, map, elt = f i map y in
+      (i, map, (x, elt)))
+    i map list
+
+let map_snd_pair_opt_with_state f i map list =
+  map_snd_pair_with_state
+    (fun i map -> function
+      | None -> (i, map, None)
+      | Some y ->
+        let i, map, elt = f i map y in
+        (i, map, Some elt))
+    i map list
+
 let normalize_type_parameters ty =
   let rec aux i map = function
     | Type_parsed.Unhandled -> (i, map, Unhandled)
@@ -115,9 +169,15 @@ let normalize_type_parameters ty =
     | Type_parsed.Tycon (s, r) ->
       let i, map, r = map_with_state aux i map r in
       (i, map, Tycon (s, r))
+    | Type_parsed.Poly_variant cs ->
+      let i, map, ms = map_snd_pair_opt_with_state aux i map cs in
+      (i, map, Poly_variant ms)
     | Type_parsed.Tuple r ->
       let i, map, r = map_with_state aux i map r in
       (i, map, Tuple r)
+    | Type_parsed.Object ms ->
+      let i, map, ms = map_snd_pair_with_state aux i map ms in
+      (i, map, Object ms)
     | Type_parsed.Tyvar var ->
       let i, map, value =
         match SMap.find_opt var map with

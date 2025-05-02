@@ -34,18 +34,50 @@ type step =
   | Right_arrow
   | Product of { position : int; length : int }
   | Argument of { position : int; length : int }
+  | Label of string
+  | Object of (string * step list list) list
+  | Poly_variant of (string * step list list) list
 
 module P = Type_polarity
+
+let rec pp ppf =
+  let open Format in
+  let pp_steps_list ppf steps =
+    let pp_sep ppf () = fprintf ppf ";@ " in
+    fprintf ppf "[@[<hov2>%a@]]"
+      (pp_print_list ~pp_sep (fun ppf (name, typ) ->
+           fprintf ppf "(%S, [@[<hov2>%a@]])" name
+             (pp_print_list ~pp_sep (fun ppf ->
+                  fprintf ppf "[@[<hov2>%a@]]" @@ pp_print_list ~pp_sep pp))
+             typ))
+      steps
+  in
+  function
+  | Wildcard -> pp_print_string ppf "Wildcard"
+  | Tyname x -> fprintf ppf "Tyname %S" x
+  | Tyvar x -> fprintf ppf "Tyvar %i" x
+  | Left_arrow -> pp_print_string ppf "Left_arrow"
+  | Right_arrow -> pp_print_string ppf "Right_arrow"
+  | Product { position; length } ->
+    fprintf ppf "Product { position = %i; length = %i }" position length
+  | Argument { position; length } ->
+    fprintf ppf "Argument { position = %i; length = %i }" position length
+  | Label label -> fprintf ppf "Label %S" label
+  | Object ms -> fprintf ppf "Object %a" pp_steps_list ms
+  | Poly_variant cs -> fprintf ppf "PolyVariant %a" pp_steps_list cs
 
 let make_path t =
   let rec aux prefix = function
     | Type_expr.Unhandled -> []
     | Type_expr.Wildcard -> [ Wildcard :: prefix ]
     | Type_expr.Tyvar x -> [ Tyvar x :: prefix ]
-    | Type_expr.Arrow { ty = a, b; _ } ->
-      List.rev_append
-        (aux (Left_arrow :: prefix) a)
-        (aux (Right_arrow :: prefix) b)
+    | Type_expr.Arrow { label; ty = a, b } ->
+      let left =
+        match label with
+        | None -> [ Left_arrow ]
+        | Some l -> [ Label l; Left_arrow ]
+      in
+      List.rev_append (aux (left @ prefix) a) (aux (Right_arrow :: prefix) b)
     | Type_expr.Tycon (constr, []) -> [ Tyname constr :: prefix ]
     | Type_expr.Tycon (constr, args) ->
       let length = String.length constr in
@@ -62,6 +94,22 @@ let make_path t =
              let prefix = Product { position; length } :: prefix in
              aux prefix arg)
       |> List.fold_left (fun acc xs -> List.rev_append xs acc) []
+    | Type_expr.Object ms ->
+      let methods = List.map (fun (name, typ) -> (name, aux [] typ)) ms in
+      [ Object methods :: prefix ]
+    | Type_expr.Poly_variant cs ->
+      let methods =
+        List.map
+          (fun (constr, arg) ->
+            let steps =
+              match arg with
+              | None -> []
+              | Some typ -> aux [] typ
+            in
+            (constr, steps))
+          cs
+      in
+      [ Poly_variant methods :: prefix ]
   in
   List.map List.rev (aux [] t)
 
@@ -91,6 +139,10 @@ let distance xs ys =
     | [ Tyvar _ ], [ Wildcard ] when P.equal xpolarity ypolarity -> 0
     | [ Tyvar x ], [ Tyvar y ] when P.equal xpolarity ypolarity ->
       if Int.equal x y then 0 else 1
+    | Left_arrow :: Label llabel :: xs, Left_arrow :: Label rlabel :: ys -> (
+      match Name_cost.distance llabel rlabel with
+      | None -> skip_entry + memo ~xpolarity ~ypolarity i (succ j) xs ys
+      | Some cost -> cost + memo ~xpolarity ~ypolarity (succ i) (succ j) xs ys)
     | Left_arrow :: xs, Left_arrow :: ys ->
       let xpolarity = P.negate xpolarity and ypolarity = P.negate ypolarity in
       memo ~xpolarity ~ypolarity (succ i) (succ j) xs ys
@@ -116,7 +168,7 @@ let distance xs ys =
     | xs, Tyname _ :: ys ->
       skip_entry + memo ~xpolarity ~ypolarity i (succ j) xs ys
     | xs, Argument _ :: ys -> memo ~xpolarity ~ypolarity i (succ j) xs ys
-    | _, (Wildcard | Tyvar _) :: _ -> max_distance
+    | _ -> max_distance
   in
 
   let positive = P.positive in

@@ -39,6 +39,8 @@ type t =
   | Arrow of { label : string option; ty : t * t }
   | Tycon of string * t list
   | Tuple of t list
+  | Object of (string * t) list
+  | Poly_variant of (string * t option) list
   | Tyvar of int
   | Wildcard
   | Unhandled

@@ -12,6 +12,15 @@ rule token = parse
 | '*' { STAR }
 | ':' { COLON }
 | '?' { QUESTION_MARK }
+| '<' { LESS }
+| '>' { GREATER }
+| ';' { SEMICOLON }
+| ".." { DOTDOT }
+| "[" { LBRACKET }
+| "]" { RBRACKET }
+| "|" { BAR }
+| "`" { BACKQUOTE }
+| "of" { OF }
 | "'" (['a'-'z' 'A'-'Z' '0'-'9' '\'' '_']* as p) { POLY p }
 | ['a'-'z' 'A'-'Z' '0'-'9' '\'' '_' '.']+ as w { WORD w }
 | eof { EOF }
