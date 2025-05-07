@@ -34,37 +34,11 @@ type step =
   | Right_arrow
   | Product of { position : int; length : int }
   | Argument of { position : int; length : int }
-  | Label of string
-  | Object of (string * step list list) list
-  | Poly_variant of (string * step list list) list
+  | Named of { name : string; kind : kind }
+
+and kind = Label | Method | Poly_variant
 
 module P = Type_polarity
-
-let rec pp ppf =
-  let open Format in
-  let pp_steps_list ppf steps =
-    let pp_sep ppf () = fprintf ppf ";@ " in
-    fprintf ppf "[@[<hov2>%a@]]"
-      (pp_print_list ~pp_sep (fun ppf (name, typ) ->
-           fprintf ppf "(%S, [@[<hov2>%a@]])" name
-             (pp_print_list ~pp_sep (fun ppf ->
-                  fprintf ppf "[@[<hov2>%a@]]" @@ pp_print_list ~pp_sep pp))
-             typ))
-      steps
-  in
-  function
-  | Wildcard -> pp_print_string ppf "Wildcard"
-  | Tyname x -> fprintf ppf "Tyname %S" x
-  | Tyvar x -> fprintf ppf "Tyvar %i" x
-  | Left_arrow -> pp_print_string ppf "Left_arrow"
-  | Right_arrow -> pp_print_string ppf "Right_arrow"
-  | Product { position; length } ->
-    fprintf ppf "Product { position = %i; length = %i }" position length
-  | Argument { position; length } ->
-    fprintf ppf "Argument { position = %i; length = %i }" position length
-  | Label label -> fprintf ppf "Label %S" label
-  | Object ms -> fprintf ppf "Object %a" pp_steps_list ms
-  | Poly_variant cs -> fprintf ppf "PolyVariant %a" pp_steps_list cs
 
 let make_path t =
   let rec aux prefix = function
@@ -75,7 +49,7 @@ let make_path t =
       let left =
         match label with
         | None -> [ Left_arrow ]
-        | Some l -> [ Label l; Left_arrow ]
+        | Some name -> [ Named { name; kind = Label }; Left_arrow ]
       in
       List.rev_append (aux (left @ prefix) a) (aux (Right_arrow :: prefix) b)
     | Type_expr.Tycon (constr, []) -> [ Tyname constr :: prefix ]
@@ -94,22 +68,24 @@ let make_path t =
              let prefix = Product { position; length } :: prefix in
              aux prefix arg)
       |> List.fold_left (fun acc xs -> List.rev_append xs acc) []
-    | Type_expr.Object ms ->
-      let methods = List.map (fun (name, typ) -> (name, aux [] typ)) ms in
-      [ Object methods :: prefix ]
-    | Type_expr.Poly_variant cs ->
-      let methods =
-        List.map
-          (fun (constr, arg) ->
-            let steps =
-              match arg with
-              | None -> []
-              | Some typ -> aux [] typ
-            in
-            (constr, steps))
-          cs
-      in
-      [ Poly_variant methods :: prefix ]
+    | Type_expr.Object methods ->
+      List.map
+        (fun (name, typ) ->
+          let prefix = Named { name; kind = Method } :: prefix in
+          aux prefix typ)
+        methods
+      |> List.fold_left (fun acc xs -> List.rev_append xs acc) []
+    | Type_expr.Poly_variant constrs ->
+      List.map
+        (fun (name, constr_arg) ->
+          let named = Named { name; kind = Poly_variant } in
+          match constr_arg with
+          | None -> [ named :: prefix ]
+          | Some typ ->
+            let prefix = named :: prefix in
+            aux prefix typ)
+        constrs
+      |> List.fold_left (fun acc xs -> List.rev_append xs acc) []
   in
   List.map List.rev (aux [] t)
 
@@ -121,6 +97,11 @@ let make_cache xs ys =
 
 let skip_entry = 10
 let max_distance = 10_000
+
+let kind_to_penality (k : kind) (k' : kind) =
+  match (k, k') with
+  | Label, Label | Method, Method | Poly_variant, Poly_variant -> 0
+  | Label, _ | Method, _ | Poly_variant, _ -> 2
 
 let distance xs ys =
   let cache = make_cache xs ys in
@@ -139,10 +120,16 @@ let distance xs ys =
     | [ Tyvar _ ], [ Wildcard ] when P.equal xpolarity ypolarity -> 0
     | [ Tyvar x ], [ Tyvar y ] when P.equal xpolarity ypolarity ->
       if Int.equal x y then 0 else 1
-    | Left_arrow :: Label llabel :: xs, Left_arrow :: Label rlabel :: ys -> (
-      match Name_cost.distance llabel rlabel with
+    | ( Named { name = lname; kind = lkind } :: xs,
+        Named { name = rname; kind = rkind } :: ys ) -> (
+      match Name_cost.distance lname rname with
       | None -> skip_entry + memo ~xpolarity ~ypolarity i (succ j) xs ys
-      | Some cost -> cost + memo ~xpolarity ~ypolarity (succ i) (succ j) xs ys)
+      | Some cost ->
+        kind_to_penality lkind rkind
+        + cost
+        + memo ~xpolarity ~ypolarity (succ i) (succ j) xs ys)
+    | Named _ :: xs, ys -> 1 + memo ~xpolarity ~ypolarity (succ i) j xs ys
+    | xs, Named _ :: ys -> 1 + memo ~xpolarity ~ypolarity i (succ j) xs ys
     | Left_arrow :: xs, Left_arrow :: ys ->
       let xpolarity = P.negate xpolarity and ypolarity = P.negate ypolarity in
       memo ~xpolarity ~ypolarity (succ i) (succ j) xs ys
@@ -170,7 +157,6 @@ let distance xs ys =
     | xs, Argument _ :: ys -> memo ~xpolarity ~ypolarity i (succ j) xs ys
     | _ -> max_distance
   in
-
   let positive = P.positive in
   aux ~xpolarity:positive ~ypolarity:positive 0 0 xs ys
 

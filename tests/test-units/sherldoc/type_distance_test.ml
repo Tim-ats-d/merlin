@@ -10,8 +10,12 @@ let expected_distance query entry expected =
       let entry = entry |> Type_expr.from_string |> Option.get in
       let computed = Type_distance.compute ~query ~entry in
       check int
-        ("distance should be " ^ string_of_int expected)
-        expected computed)
+        ("a. distance should be " ^ string_of_int expected)
+        expected computed
+      (* ;
+      check int
+        ("b. distance should be " ^ string_of_int expected)
+        computed expected *))
 
 let cases =
   ( "type_distance",
@@ -41,7 +45,31 @@ let cases =
         "('a -> 'b) -> 'a list -> 'b list" 2;
       expected_distance "'a -> 'b option -> 'a option"
         "'b option -> 'a -> 'a option" 3;
-      expected_distance "foo:a -> bar:b -> c" "a -> b -> c" 0;
-      expected_distance "a -> b -> c" "foo:a -> bar:b -> c" 0;
-      expected_distance "foo:a -> b -> c" "boo:a -> b -> c" 0
+      expected_distance "foo:'a -> bar:'b -> 'c" "foo:'a -> 'b -> 'c" 1;
+      expected_distance "foo:a -> bar:b -> c" "a -> b -> c" 2;
+      expected_distance "foo:'a -> 'b -> 'c" "boo:'a -> 'b -> 'c" 1;
+      expected_distance "< foo : int > -> int" "< boo : int > -> string" 5;
+      expected_distance "< foo : int > -> 'a" "< foo : int list > -> 'a" 2;
+      expected_distance "foobar:int list -> string" "foobar:float -> string"
+        1000;
+      expected_distance "< foobar:int list ; ..> -> string"
+        "foobar:int list -> string" 1;
+      (* expected_distance "< foobar:int list ; bar : string list;  ..> -> string"
+        "foobar:int list -> string" 10; *)
+      expected_distance "[< `Foo of 'a] -> 'b" "'a -> [> `Bar of 'b]" 2;
+      expected_distance "'b -> [< `Foo of 'a]" "'a -> [> `Bar of 'b]" 2;
+      expected_distance "foo:'i -> bar:'love -> 'ocaml"
+        "< foo : 'ocaml; bar : 'love; > -> 'i" 3;
+      expected_distance
+        "< hmmm :'a ; .. > -> [`brrr of 'b] -> [< `hmm of 'a ] -> < hehehe:'c; \
+         > -> float"
+        "[`hmmm of 'b ] -> brrr:'a -> < hmm : 'b > -> [`hehehe of 'c ] -> float"
+        7;
+      expected_distance
+        "f:(int -> int64) -> on:(int -> int) -> int list -> int64 list"
+        "< f : int -> int64; on : int -> int > -> int list -> int64 list" 6;
+      expected_distance
+        "f:(int -> int64) -> on:(int -> int) -> int list -> int64 list"
+        "(int64 -> int) -> on:(int64 -> int64) -> int64 list -> int list" 14
     ] )
+

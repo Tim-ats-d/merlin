@@ -1,0 +1,20 @@
+- Ajouter des cramtests qui tire partie des nouvelles capacités de la recherche par type
+- si labeled arguments en premier alors ça les prend (sinon ça les ignore pas mal)
+- Ajouter des fonctions qui prennent des objets dans tests/test-dirs/search/search-by-type.t/context.ml
+- Handle si argument optionnel labelé ou positional
+
+Explication pb pour Arthur :
+
+on veut prioriser les fonctions résultantes contenant des labels si l'utilisateur en a inclu dans sa query
+continuer à utiliser l'algorithme d'Arthur permet potentiellement de prédire des isomoprhismes auxquels on avait pensé
+
+sinon on peut collecter les arguments labelisés présent dans la query et implémenter une fonction de comparaison de map
+
+ce qui permet de gérer facilement les cas comme :
+< foo : int; champs_qui_pollue : float ; garbage : float list > -> int
+
+possibilité d'inclusion
+
+additonner le résultat de la fonction distance de leveinsten (?) avec la pénalité évaluée par la nouvelle fonction de comparaison de map
+
+

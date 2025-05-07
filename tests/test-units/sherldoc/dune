@@ -2,7 +2,3 @@
  (name sherlodoc_test)
  (package merlin-lib)
  (libraries fmt alcotest merlin-lib.sherlodoc))
-
-(executable
- (name type_distance_test_tempo)
- (libraries fmt merlin-lib.sherlodoc))

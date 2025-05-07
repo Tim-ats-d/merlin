@@ -141,9 +141,10 @@ map).
     "type": "('a -> 'b option) -> 'a list -> 'b list"
   }
   {
-    "name": "ListLabels.concat_map",
-    "type": "f:('a -> 'b list) -> 'a list -> 'b list"
+    "name": "Array.map",
+    "type": "('a -> 'b) -> 'a array -> 'b array"
   }
+
 
 
 4.) Looking for a function that take a list of list of flatten-it into

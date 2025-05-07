@@ -81,13 +81,13 @@
   {
     "name": "ListLabels.map",
     "type": "f:('a -> 'b) -> 'a list -> 'b list",
-    "cost": 0,
+    "cost": 2,
     "doc": null
   }
   {
     "name": "ListLabels.rev_map",
     "type": "f:('a -> 'b) -> 'a list -> 'b list",
-    "cost": 0,
+    "cost": 2,
     "doc": null
   }
   {
@@ -99,7 +99,7 @@
   {
     "name": "ListLabels.mapi",
     "type": "f:(int -> 'a -> 'b) -> 'a list -> 'b list",
-    "cost": 5,
+    "cost": 7,
     "doc": null
   }
   {
@@ -121,9 +121,9 @@
     "doc": null
   }
   {
-    "name": "ListLabels.concat_map",
-    "type": "f:('a -> 'b list) -> 'a list -> 'b list",
-    "cost": 10,
+    "name": "Array.map",
+    "type": "('a -> 'b) -> 'a array -> 'b array",
+    "cost": 12,
     "doc": null
   }
 
@@ -210,25 +210,9 @@
         "name": "Either.map",
         "type": "left:('a1 -> 'a2) ->
   right:('b1 -> 'b2) -> ('a1, 'b1) Either.t -> ('a2, 'b2) Either.t",
-        "cost": 44,
+        "cost": 46,
         "doc": null,
         "constructible": "Either.map ~left:_ ~right:_ _"
-      },
-      {
-        "file": "moreLabels.mli",
-        "start": {
-          "line": 134,
-          "col": 2
-        },
-        "end": {
-          "line": 134,
-          "col": 51
-        },
-        "name": "MoreLabels.Hashtbl.add",
-        "type": "('a, 'b) MoreLabels.Hashtbl.t -> key:'a -> data:'b -> unit",
-        "cost": 47,
-        "doc": null,
-        "constructible": "MoreLabels.Hashtbl.add _ ~key:_ ~data:_"
       },
       {
         "file": "moreLabels.mli",
@@ -249,18 +233,18 @@
       {
         "file": "moreLabels.mli",
         "start": {
-          "line": 169,
+          "line": 134,
           "col": 2
         },
         "end": {
-          "line": 169,
-          "col": 55
+          "line": 134,
+          "col": 51
         },
-        "name": "MoreLabels.Hashtbl.replace",
+        "name": "MoreLabels.Hashtbl.add",
         "type": "('a, 'b) MoreLabels.Hashtbl.t -> key:'a -> data:'b -> unit",
-        "cost": 48,
+        "cost": 49,
         "doc": null,
-        "constructible": "MoreLabels.Hashtbl.replace _ ~key:_ ~data:_"
+        "constructible": "MoreLabels.Hashtbl.add _ ~key:_ ~data:_"
       },
       {
         "file": "moreLabels.mli",
@@ -277,6 +261,22 @@
         "cost": 49,
         "doc": null,
         "constructible": "MoreLabels.Hashtbl.replace_seq _ _"
+      },
+      {
+        "file": "moreLabels.mli",
+        "start": {
+          "line": 169,
+          "col": 2
+        },
+        "end": {
+          "line": 169,
+          "col": 55
+        },
+        "name": "MoreLabels.Hashtbl.replace",
+        "type": "('a, 'b) MoreLabels.Hashtbl.t -> key:'a -> data:'b -> unit",
+        "cost": 50,
+        "doc": null,
+        "constructible": "MoreLabels.Hashtbl.replace _ ~key:_ ~data:_"
       },
       {
         "file": "ephemeron.mli",
@@ -362,3 +362,13 @@
     "cost": 4,
     "doc": "Convert the given string to a float.  The string is read in decimal    (by default) or in hexadecimal (marked by [0x] or [0X]).     The format of decimal floating-point numbers is    [ [-] dd.ddd (e|E) [+|-] dd ], where [d] stands for a decimal digit.     The format of hexadecimal floating-point numbers is    [ [-] 0(x|X) hh.hhh (p|P) [+|-] dd ], where [h] stands for an    hexadecimal digit and [d] for a decimal digit.     In both cases, at least one of the integer and fractional parts must be    given; the exponent part is optional.     The [_] (underscore) character can appear anywhere in the string    and is ignored.     Depending on the execution platforms, other representations of    floating-point numbers can be accepted, but should not be relied upon.     Return [None] if the given string is not a valid representation of a float.    @since 4.05"
   }
+
+
+  $ $MERLIN single search-by-type -filename ./context.ml \
+  > -position 5:25 -limit 10 -with-doc true -query "pos:int -> len:int -> bytes -> bytes" |
+  > tr '\n' ' ' | jq  '.value[] | {name,type,cost,doc}'
+
+$ $MERLIN single search-by-type -filename ./context.ml \
+> -position 5:25 -limit 10 -with-doc true -query "field:'a -> 'd" |
+> tr '\n' ' ' | jq  '.value[] | {name,type,cost,doc}'
+
