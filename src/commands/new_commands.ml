@@ -565,6 +565,26 @@ let all_commands =
           | Some action, (#Msource.position as pos) ->
             run buffer (Query_protocol.Refactor_open (action, pos))
       end;
+    command "refactoring-extract-region" ~doc:"extract a region as function"
+      ~spec:
+        [ arg "-start" "<position> Where extracted region start"
+            (marg_position (fun start (_start, stop) -> (start, stop)));
+          arg "-end" "<position> Where extracted region end"
+            (marg_position (fun stop (start, _stop) -> (start, stop)))
+        ]
+      ~default:(`None, `None)
+      begin
+        fun buffer (start, stop) ->
+          match (start, stop) with
+          | `None, `None -> failwith "-start <pos> and -end are mandatory"
+          | `None, _ -> failwith "-start <pos> is mandatory"
+          | _, `None -> failwith "-end <pos> is mandatory"
+          | (#Msource.position, #Msource.position) as position ->
+            let start, stop = position in
+            let raw_source = Mpipeline.raw_source buffer in
+            run buffer
+              (Query_protocol.Refactor_extract_region (start, stop, raw_source))
+      end;
     command "search-by-polarity"
       ~doc:"search-by-polarity -position pos -query ident\n\tTODO"
       ~spec:

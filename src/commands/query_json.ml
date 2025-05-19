@@ -211,6 +211,9 @@ let dump (type a) : a t -> json =
             | `Unqualify -> "unqualify") );
         ("position", mk_position pos)
       ]
+  | Refactor_extract_region (start, stop, _) ->
+    mk "refactoring-extract-region"
+      [ ("start", mk_position start); ("stop", mk_position stop) ]
   | Signature_help { position; _ } ->
     mk "signature-help" [ ("position", mk_position position) ]
   | Version -> mk "version" []
@@ -406,6 +409,12 @@ let json_of_search_result list =
   in
   `List list
 
+let json_of_diff = function
+  | Addition (loc, content) ->
+    with_location loc
+      [ ("kind", `String "addition"); ("content", `String content) ]
+  | Deletion loc -> with_location loc [ ("kind", `String "deletion") ]
+
 let json_of_response (type a) (query : a t) (response : a) : json =
   match (query, response) with
   | Type_expr _, str -> `String str
@@ -420,6 +429,8 @@ let json_of_response (type a) (query : a t) (response : a) : json =
     `List
       (List.map locations ~f:(fun (name, loc) ->
            with_location loc [ ("content", `String name) ]))
+  | Refactor_extract_region _, diffs ->
+    `List (List.map diffs ~f:json_of_diff)
   | Document _, resp -> begin
     match resp with
     | `No_documentation -> `String "No documentation available"

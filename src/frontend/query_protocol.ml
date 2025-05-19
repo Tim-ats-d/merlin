@@ -132,6 +132,8 @@ type occurrences_status =
 
 type occurrence = { loc : Location.t; is_stale : bool }
 
+type diff = Addition of Location.t * string | Deletion of Location.t
+
 type _ t =
   | Type_expr (* *) : string * Msource.position -> string t
   | Type_enclosing (* *) :
@@ -157,6 +159,9 @@ type _ t =
   | Refactor_open :
       [ `Qualify | `Unqualify ] * Msource.position
       -> (string * Location.t) list t
+  | Refactor_extract_region :
+      Msource.position * Msource.position * Msource.t
+      -> diff list t
   | Document (* *) :
       string option * Msource.position
       -> [ `Found of string
