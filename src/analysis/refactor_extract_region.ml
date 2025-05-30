@@ -141,13 +141,12 @@ let free_variables node env =
   let mentionned_vars = find_vars node env in
   let bounded_vars = find_bounded_vars node env in
 
-  let _ =
+  (* let _ =
     prerr_endline "Mentionned";
     Path.Set.iter (fun p -> prerr_endline ("  " ^ Path.name p)) mentionned_vars;
     prerr_endline "Defined";
     Path.Set.iter (fun p -> prerr_endline ("  " ^ Path.name p)) bounded_vars
-  in
-
+  in *)
   Path.Set.diff mentionned_vars bounded_vars |> Path.Set.to_list
 
 (* Maybe add this function in Msource? *)
@@ -202,28 +201,25 @@ let select_suitable_expr ~start ~stop nodes =
   let region =
     { Location.loc_start = start; loc_end = stop; loc_ghost = true }
   in
+  let rec select_among_child env node =
+    let node_loc = Mbrowse.node_loc node in
+    (* let is = Location_aux.included node_loc ~into:region in
+    Format.asprintf "Candidate: %S, contains: %b, loc: %a"
+      (Browse_raw.string_of_node node)
+      is Location.print_loc node_loc
+    |> prerr_endline; *)
+    match node with
+    | Expression expr ->
+      if Location_aux.included node_loc ~into:region then Some (expr, env)
+      else
+        let node = Browse_tree.of_node ~env node in
+        Lazy.force node.t_children |> List.rev
+        |> List.find_map (fun node ->
+               select_among_child node.Browse_tree.t_env node.t_node)
+    | _ -> None
+  in
   nodes |> List.rev
-  |> List.find_map (fun (env, node) ->
-         let node_loc = Mbrowse.node_loc node in
-         (* let is = Location_aux.included node_loc ~into:region in
-         Format.asprintf "Candidate: %S, contains: %b, loc: %a"
-           (Browse_raw.string_of_node node)
-           is Location.print_loc node_loc
-         |> prerr_endline; *)
-         match node with
-         | Expression expr when Location_aux.included node_loc ~into:region ->
-           Some (expr, env)
-         | Value_binding { vb_expr; _ } ->
-           (* let () =
-             Format.asprintf "Candidate: \"vb expr\", contains: %b, loc: %a"
-               (Location_aux.included vb_expr.exp_loc ~into:region)
-               Location.print_loc vb_expr.exp_loc
-             |> prerr_endline
-           in *)
-           if Location_aux.included vb_expr.exp_loc ~into:region then
-             Some (vb_expr, vb_expr.exp_env)
-           else None
-         | _ -> None)
+  |> List.find_map (fun (env, node) -> select_among_child env node)
 
 let diffs ~start ~stop raw_source structure =
   let enclosing = Mbrowse.enclosing start [ Mbrowse.of_structure structure ] in
@@ -267,3 +263,4 @@ demander à ulysse si l'euphorisme lui paraît correcte
 regarder Env.diff *)
 
 (* ajouter test récursion mutuelle *)
+
