@@ -1,4 +1,4 @@
-  $ $MERLIN single refactoring-extract-region -start 3:25 -end 3:34 < foo.ml
+  $ $MERLIN single refactoring-extract-region -start 3:25 -end 3:34 < const.ml
   {
     "class": "return",
     "value": [
@@ -92,14 +92,80 @@
     "notifications": []
   }
 
-  $ $MERLIN single refactoring-extract-region -start 14:18 -end 14:32 < foo.ml
+  $ $MERLIN single refactoring-extract-region -start 15:18 -end 15:32 < const.ml
   {
-    "class": "failure",
-    "value": "nothing to do",
+    "class": "return",
+    "value": [
+      {
+        "start": {
+          "line": 15,
+          "col": 18
+        },
+        "end": {
+          "line": 15,
+          "col": 32
+        },
+        "kind": "deletion"
+      },
+      {
+        "start": {
+          "line": 15,
+          "col": 18
+        },
+        "end": {
+          "line": 15,
+          "col": 32
+        },
+        "kind": "addition",
+        "content": "const_name2"
+      },
+      {
+        "start": {
+          "line": 10,
+          "col": 0
+        },
+        "end": {
+          "line": 24,
+          "col": 3
+        },
+        "kind": "addition",
+        "content": "let const_name2 = 1000000000L"
+      },
+      {
+        "start": {
+          "line": 25,
+          "col": 0
+        },
+        "end": {
+          "line": 25,
+          "col": 0
+        },
+        "kind": "addition",
+        "content": "
+  
+  let log ppf msg = Format.pp_print_string ppf (\"CRITICAL: \" ^ msg)
+  
+  module type EMPTY = sig end
+  let f () : (module EMPTY) =
+    (module struct
+      let const_name2 = assert false
+      let secret = String.make 100 '@'
+    end)
+  
+  let g () =
+    let multilines_cst = {foo|
+  multi
+  lines
+  constant
+  |foo} in
+    print_endline multilines_cst
+  "
+      }
+    ],
     "notifications": []
   }
 
-  $ $MERLIN single refactoring-extract-region -start 5:24 -end 5:28 < foo.ml
+  $ $MERLIN single refactoring-extract-region -start 5:24 -end 5:28 < const.ml
   {
     "class": "return",
     "value": [
@@ -189,7 +255,7 @@
     "notifications": []
   }
 
-  $ $MERLIN single refactoring-extract-region -start 26:46 -end 26:58 < foo.ml
+  $ $MERLIN single refactoring-extract-region -start 26:46 -end 26:58 < const.ml
   {
     "class": "return",
     "value": [
@@ -260,7 +326,7 @@
     "notifications": []
   }
 
-  $ $MERLIN single refactoring-extract-region -start 32:33 -end 32:36 < foo.ml
+  $ $MERLIN single refactoring-extract-region -start 32:33 -end 32:36 < const.ml
   {
     "class": "return",
     "value": [
@@ -324,7 +390,7 @@
     "notifications": []
   }
 
-  $ $MERLIN single refactoring-extract-region -start 36:6 -end 41:31 < foo.ml
+  $ $MERLIN single refactoring-extract-region -start 36:23 -end 40:5 < const.ml
   {
     "class": "return",
     "value": [
