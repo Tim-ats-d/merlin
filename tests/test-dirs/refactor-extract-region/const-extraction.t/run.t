@@ -78,6 +78,14 @@
       let const_name2 = assert false
       let secret = String.make 100 '@'
     end)
+  
+  let g () =
+    let multilines_cst = {foo|
+  multi
+  lines
+  constant
+  |foo} in
+    print_endline multilines_cst
   "
       }
     ],
@@ -167,6 +175,14 @@
       let const_name2 = assert false
       let secret = String.make 100 '@'
     end)
+  
+  let g () =
+    let multilines_cst = {foo|
+  multi
+  lines
+  constant
+  |foo} in
+    print_endline multilines_cst
   "
       }
     ],
@@ -230,6 +246,14 @@
       let const_name2 = assert false
       let secret = String.make 100 '@'
     end)
+  
+  let g () =
+    let multilines_cst = {foo|
+  multi
+  lines
+  constant
+  |foo} in
+    print_endline multilines_cst
   "
       }
     ],
@@ -282,6 +306,74 @@
         },
         "end": {
           "line": 34,
+          "col": 0
+        },
+        "kind": "addition",
+        "content": "
+  
+  let g () =
+    let multilines_cst = {foo|
+  multi
+  lines
+  constant
+  |foo} in
+    print_endline multilines_cst
+  "
+      }
+    ],
+    "notifications": []
+  }
+
+  $ $MERLIN single refactoring-extract-region -start 36:6 -end 41:31 < foo.ml
+  {
+    "class": "return",
+    "value": [
+      {
+        "start": {
+          "line": 36,
+          "col": 23
+        },
+        "end": {
+          "line": 40,
+          "col": 5
+        },
+        "kind": "deletion"
+      },
+      {
+        "start": {
+          "line": 36,
+          "col": 23
+        },
+        "end": {
+          "line": 40,
+          "col": 5
+        },
+        "kind": "addition",
+        "content": "const_name2"
+      },
+      {
+        "start": {
+          "line": 35,
+          "col": 0
+        },
+        "end": {
+          "line": 41,
+          "col": 30
+        },
+        "kind": "addition",
+        "content": "let const_name2 = {foo|
+  multi
+  lines
+  constant
+  |foo}"
+      },
+      {
+        "start": {
+          "line": 42,
+          "col": 0
+        },
+        "end": {
+          "line": 42,
           "col": 0
         },
         "kind": "addition",

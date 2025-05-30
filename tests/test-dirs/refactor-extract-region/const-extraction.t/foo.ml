@@ -31,3 +31,11 @@ let f () : (module EMPTY) =
     let const_name2 = assert false
     let secret = String.make 100 '@'
   end)
+
+let g () =
+  let multilines_cst = {foo|
+multi
+lines
+constant
+|foo} in
+  print_endline multilines_cst

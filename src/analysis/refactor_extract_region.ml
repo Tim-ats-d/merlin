@@ -212,14 +212,24 @@ let select_suitable_expr ~start ~stop nodes =
          |> prerr_endline; *)
          match node with
          | Expression expr when Location_aux.included node_loc ~into:region ->
-           Some (node, expr, env)
+           Some (expr, env)
+         | Value_binding { vb_expr; _ } ->
+           (* let () =
+             Format.asprintf "Candidate: \"vb expr\", contains: %b, loc: %a"
+               (Location_aux.included vb_expr.exp_loc ~into:region)
+               Location.print_loc vb_expr.exp_loc
+             |> prerr_endline
+           in *)
+           if Location_aux.included vb_expr.exp_loc ~into:region then
+             Some (vb_expr, vb_expr.exp_env)
+           else None
          | _ -> None)
 
 let diffs ~start ~stop raw_source structure =
   let enclosing = Mbrowse.enclosing start [ Mbrowse.of_structure structure ] in
   match select_suitable_expr ~start ~stop enclosing with
   | None -> failwith "nothing to do"
-  | Some (node, expr, expr_env) -> begin
+  | Some (expr, expr_env) -> begin
     let toplevel_parent_item =
       List.find
         (fun item ->
@@ -233,7 +243,9 @@ let diffs ~start ~stop raw_source structure =
       (* Special case for constant. They can't produce side effect so it's not
          necessary to add a trailing unit parameter to the let binding. *)
       extract_const_to_toplevel const raw_source ~expr_env ~src ~dst
-    | _ -> extract_expr_to_toplevel node expr raw_source ~expr_env ~src ~dst
+    | _ ->
+      extract_expr_to_toplevel (Expression expr) expr raw_source ~expr_env ~src
+        ~dst
   end
 
 (*
