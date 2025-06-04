@@ -1,4 +1,4 @@
-  $ $MERLIN single refactoring-extract-region -start 3:25 -end 3:34 < const.ml
+  $ $MERLIN single refactoring-extract-region -start 3:25 -end 3:34 -extract-name pi < const.ml
   {
     "class": "return",
     "value": [
@@ -23,8 +23,8 @@
           "col": 50
         },
         "kind": "addition",
-        "content": "let const_name2 = 3.14159
-  let circle_area radius = const_name2 *. (radius ** 2.)"
+        "content": "let pi = 3.14159
+  let circle_area radius = pi *. (radius ** 2.)"
       }
     ],
     "notifications": []

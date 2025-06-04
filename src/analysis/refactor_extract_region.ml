@@ -146,45 +146,47 @@ end
   Path.Set.diff mentionned_vars bounded_vars |> Path.Set.to_list *)
 
 let free_variables _ _ = []
+
 let logical_of_loc loc =
   let line, col = Std.Lexing.split_pos loc in
   `Logical (line, col)
 
-let length buf loc =
-  let (`Offset start_offset) =
-    logical_of_loc loc.Location.loc_start |> Msource.get_offset buf
-  in
-  let (`Offset end_offset) =
-    logical_of_loc loc.Location.loc_end |> Msource.get_offset buf
-  in
-  end_offset - start_offset
-
+(* Maybe add this in [Msource]? *)
 let buffer_sub_loc buf loc =
   let (`Offset start_offset) =
     let line, col = Std.Lexing.split_pos loc.Location.loc_start in
     Msource.get_offset buf (`Logical (line, col))
   in
-  String.sub (Msource.text buf) start_offset (length buf loc) |> Msource.make
+  let (`Offset end_offset) =
+    logical_of_loc loc.Location.loc_end |> Msource.get_offset buf
+  in
+  String.sub (Msource.text buf) start_offset (end_offset - start_offset)
+  |> Msource.make
 
-let extract_to_toplevel name expr let_binding buffer ~expr_env ~src
-    ~dst:toplevel_item_loc =
-  let val_name = FreshName.gen_val_name name expr_env in
+let extract_to_toplevel name expr gen_let_binding buffer ~expr_env ~exp_loc
+    ~toplevel_item_loc =
+  let val_name =
+    match name with
+    | `Default name -> FreshName.gen_val_name name expr_env
+    | `Given name -> name
+  in
   let fresh_let_binding =
-    let_binding val_name expr |> Format.asprintf "%a" Pprintast.structure_item
+    gen_let_binding val_name expr
+    |> Format.asprintf "%a" Pprintast.structure_item
   in
   let toplevel_item = buffer_sub_loc buffer toplevel_item_loc in
   let substitued_toplevel_item =
     let loc =
       let start_lnum =
-        1 + src.Location.loc_start.pos_lnum
+        1 + exp_loc.Location.loc_start.pos_lnum
         - toplevel_item_loc.loc_start.pos_lnum
       in
-      { src with
-        loc_start = { src.loc_start with pos_lnum = start_lnum };
+      { exp_loc with
+        loc_start = { exp_loc.loc_start with pos_lnum = start_lnum };
         loc_end =
-          { src.loc_end with
+          { exp_loc.loc_end with
             pos_lnum =
-              start_lnum + src.loc_end.pos_lnum - src.loc_start.pos_lnum
+              start_lnum + exp_loc.loc_end.pos_lnum - exp_loc.loc_start.pos_lnum
           }
       }
     in
@@ -199,18 +201,26 @@ let extract_to_toplevel name expr let_binding buffer ~expr_env ~src
     Query_protocol.Addition (toplevel_item_loc, inserted)
   ]
 
-let extract_const_to_toplevel const =
-  extract_to_toplevel "const_name" (Untypeast.constant const)
+let extract_const_to_toplevel ?extract_name const =
+  let name =
+    Option.fold extract_name ~none:(`Default "const_name") ~some:(fun name ->
+        `Given name)
+  in
+  extract_to_toplevel name (Untypeast.constant const)
     Gen.let_const_toplevel_binding
 
-let extract_expr_to_toplevel node expr ~expr_env =
+let extract_expr_to_toplevel ?extract_name node expr ~expr_env =
   let generated_let =
     match (free_variables node expr_env, expr.Typedtree.exp_desc) with
     | [], Texp_function _ -> Gen.toplevel_let_binding
     | [], _ -> Gen.let_unit_toplevel_binding
     | fun_params, _ -> Gen.toplevel_function fun_params
   in
-  extract_to_toplevel "fun_name"
+  let name =
+    Option.fold extract_name ~none:(`Default "fun_name") ~some:(fun name ->
+        `Given name)
+  in
+  extract_to_toplevel name
     (Untypeast.untype_expression expr)
     generated_let ~expr_env
 
@@ -239,7 +249,7 @@ let select_suitable_expr ~start ~stop nodes =
   nodes |> List.rev
   |> List.find_map (fun (env, node) -> select_among_child env node)
 
-let diffs ~start ~stop raw_source structure =
+let diffs ~start ~stop ?extract_name buffer structure =
   let enclosing = Mbrowse.enclosing start [ Mbrowse.of_structure structure ] in
   match select_suitable_expr ~start ~stop enclosing with
   | None -> failwith "nothing to do"
@@ -250,40 +260,31 @@ let diffs ~start ~stop raw_source structure =
           Location_aux.included expr.exp_loc ~into:item.Typedtree.str_loc)
         structure.str_items
     in
-    let src = expr.exp_loc in
-    let dst = toplevel_parent_item.str_loc in
+    let exp_loc = expr.exp_loc in
+    let toplevel_item_loc = toplevel_parent_item.str_loc in
     match expr.exp_desc with
     | Texp_constant const ->
       (* Special case for constant. They can't produce side effect so it's not
          necessary to add a trailing unit parameter to the let binding. *)
-      extract_const_to_toplevel const raw_source ~expr_env ~src ~dst
+      extract_const_to_toplevel const buffer ?extract_name ~expr_env ~exp_loc
+        ~toplevel_item_loc
     | _ ->
-      extract_expr_to_toplevel (Browse_raw.Expression expr) expr raw_source
-        ~expr_env ~src ~dst
+      extract_expr_to_toplevel (Browse_raw.Expression expr) expr buffer
+        ?extract_name ~expr_env ~exp_loc ~toplevel_item_loc
   end
 
-(*
-Identifier les variables référencées et récupérer leur loc avec project wide occurence
-
-récupérer localisation des vars de l'expression toplevel extraite
+(* Récupérer localisation des vars de l'expression toplevel extraite (voir analysis/locate.ml)
 
 Si la loc est en dehors du buffer -> pas libre
 Si la loc est au dessus de l'expression toplevel extraite -> libre
-Sinon tout ce qui est compris dans l'enclosing -> variable libre
-
-demander à ulysse si l'euphorisme lui paraît correcte
-
-regarder Env.diff *)
+Sinon tout ce qui est compris dans l'enclosing -> variable libre *)
 
 (* ajouter test récursion mutuelle *)
 
-(* prendre:
- - target_name (optionel)
-
-renvoyer:
+(* renvoyer:
   - target_name
   - location à highlight
   - location à remplacer
   - contenu *)
 
-(* couple uid var  *)
+(* supprimer la génération de valeur quand le nom donné est une string. *)

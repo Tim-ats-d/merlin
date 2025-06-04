@@ -160,7 +160,7 @@ type _ t =
       [ `Qualify | `Unqualify ] * Msource.position
       -> (string * Location.t) list t
   | Refactor_extract_region :
-      Msource.position * Msource.position * Msource.t
+      Msource.position * Msource.position * string option * Msource.t
       -> diff list t
   | Document (* *) :
       string option * Msource.position
