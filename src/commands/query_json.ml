@@ -429,8 +429,7 @@ let json_of_response (type a) (query : a t) (response : a) : json =
     `List
       (List.map locations ~f:(fun (name, loc) ->
            with_location loc [ ("content", `String name) ]))
-  | Refactor_extract_region _, diffs ->
-    `List (List.map diffs ~f:json_of_diff)
+  | Refactor_extract_region _, diffs -> `List (List.map diffs ~f:json_of_diff)
   | Document _, resp -> begin
     match resp with
     | `No_documentation -> `String "No documentation available"

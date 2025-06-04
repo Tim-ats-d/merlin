@@ -1,8 +1,3 @@
-module Diff = struct
-  let add loc content = Query_protocol.Addition (loc, content)
-  let delete loc = Query_protocol.Deletion loc
-end
-
 module FreshName = struct
   (* Generate a fresh name that does not already exists in given environment. *)
   let gen_val_name basename env =
@@ -17,6 +12,7 @@ module Gen = struct
   let toplevel_let_binding name body =
     let open Ast_helper in
     let pattern = Pat.mk (Ppat_var { txt = name; loc = Location.none }) in
+    let body = Parsetree_utils.filter_expr_attr body in
     Str.value Nonrecursive [ Vb.mk pattern body ]
 
   let let_const_toplevel_binding name const =
@@ -55,7 +51,7 @@ module Gen = struct
     toplevel_let_binding name body
 end
 
-let free_variables node env =
+(* let free_variables node env =
   let concat_set f children =
     List.fold_left
       (fun acc child -> f child |> Path.Set.union acc)
@@ -147,39 +143,61 @@ let free_variables node env =
     prerr_endline "Defined";
     Path.Set.iter (fun p -> prerr_endline ("  " ^ Path.name p)) bounded_vars
   in *)
-  Path.Set.diff mentionned_vars bounded_vars |> Path.Set.to_list
+  Path.Set.diff mentionned_vars bounded_vars |> Path.Set.to_list *)
 
-(* Maybe add this function in Msource? *)
-let buffer_sub source start stop =
-  let (`Offset start_offset) = Msource.get_offset source start in
-  let (`Offset end_offset) = Msource.get_offset source stop in
-  let buffer = Msource.text source in
-  String.sub buffer start_offset (end_offset - start_offset)
+let free_variables _ _ = []
+let logical_of_loc loc =
+  let line, col = Std.Lexing.split_pos loc in
+  `Logical (line, col)
 
-let extract_to_toplevel name expr let_binding source ~expr_env ~src ~dst =
-  let name = FreshName.gen_val_name name expr_env in
-  let substitution = [ Diff.delete src; Diff.add src name ] in
+let length buf loc =
+  let (`Offset start_offset) =
+    logical_of_loc loc.Location.loc_start |> Msource.get_offset buf
+  in
+  let (`Offset end_offset) =
+    logical_of_loc loc.Location.loc_end |> Msource.get_offset buf
+  in
+  end_offset - start_offset
+
+let buffer_sub_loc buf loc =
+  let (`Offset start_offset) =
+    let line, col = Std.Lexing.split_pos loc.Location.loc_start in
+    Msource.get_offset buf (`Logical (line, col))
+  in
+  String.sub (Msource.text buf) start_offset (length buf loc) |> Msource.make
+
+let extract_to_toplevel name expr let_binding buffer ~expr_env ~src
+    ~dst:toplevel_item_loc =
+  let val_name = FreshName.gen_val_name name expr_env in
   let fresh_let_binding =
-    let_binding name expr
-    |> Format.asprintf "%a" Pprintast.structure_item
-    |> Diff.add dst
+    let_binding val_name expr |> Format.asprintf "%a" Pprintast.structure_item
   in
-  let end_of_buffer =
-    let _, line, col = Location.get_pos_info dst.loc_end in
-    buffer_sub source (`Logical (line, col)) `End
-  in
-  let buffer_dst =
+  let toplevel_item = buffer_sub_loc buffer toplevel_item_loc in
+  let substitued_toplevel_item =
     let loc =
-      { dst.loc_end with
-        pos_cnum = 0;
-        pos_bol = 0;
-        pos_lnum = dst.loc_end.pos_lnum + 1
+      let start_lnum =
+        1 + src.Location.loc_start.pos_lnum
+        - toplevel_item_loc.loc_start.pos_lnum
+      in
+      { src with
+        loc_start = { src.loc_start with pos_lnum = start_lnum };
+        loc_end =
+          { src.loc_end with
+            pos_lnum =
+              start_lnum + src.loc_end.pos_lnum - src.loc_start.pos_lnum
+          }
       }
     in
-    { Location.loc_start = loc; loc_end = loc; loc_ghost = false }
+    Msource.substitute toplevel_item
+      (logical_of_loc loc.loc_start)
+      (logical_of_loc loc.loc_end)
+      val_name
+    |> Msource.text
   in
-  let insertion = [ fresh_let_binding; Diff.add buffer_dst end_of_buffer ] in
-  substitution @ insertion
+  let inserted = fresh_let_binding ^ "\n" ^ substitued_toplevel_item in
+  [ Query_protocol.Deletion toplevel_item_loc;
+    Query_protocol.Addition (toplevel_item_loc, inserted)
+  ]
 
 let extract_const_to_toplevel const =
   extract_to_toplevel "const_name" (Untypeast.constant const)
@@ -240,21 +258,16 @@ let diffs ~start ~stop raw_source structure =
          necessary to add a trailing unit parameter to the let binding. *)
       extract_const_to_toplevel const raw_source ~expr_env ~src ~dst
     | _ ->
-      extract_expr_to_toplevel (Expression expr) expr raw_source ~expr_env ~src
-        ~dst
+      extract_expr_to_toplevel (Browse_raw.Expression expr) expr raw_source
+        ~expr_env ~src ~dst
   end
-
-(*
-- Better commit history
-- Utiliser environnement local pour savoir
-*)
 
 (*
 Identifier les variables référencées et récupérer leur loc avec project wide occurence
 
 récupérer localisation des vars de l'expression toplevel extraite
 
-Si la loc est en dehors du buffer -> considéré comme lié
+Si la loc est en dehors du buffer -> pas libre
 Si la loc est au dessus de l'expression toplevel extraite -> libre
 Sinon tout ce qui est compris dans l'enclosing -> variable libre
 
@@ -264,3 +277,13 @@ regarder Env.diff *)
 
 (* ajouter test récursion mutuelle *)
 
+(* prendre:
+ - target_name (optionel)
+
+renvoyer:
+  - target_name
+  - location à highlight
+  - location à remplacer
+  - contenu *)
+
+(* couple uid var  *)

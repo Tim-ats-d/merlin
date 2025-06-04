@@ -579,8 +579,7 @@ let all_commands =
           | `None, `None -> failwith "-start <pos> and -end are mandatory"
           | `None, _ -> failwith "-start <pos> is mandatory"
           | _, `None -> failwith "-end <pos> is mandatory"
-          | (#Msource.position, #Msource.position) as position ->
-            let start, stop = position in
+          | (#Msource.position as start), (#Msource.position as stop) ->
             let raw_source = Mpipeline.raw_source buffer in
             run buffer
               (Query_protocol.Refactor_extract_region (start, stop, raw_source))
