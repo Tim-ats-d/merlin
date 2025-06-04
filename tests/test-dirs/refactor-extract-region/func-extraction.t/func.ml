@@ -12,10 +12,11 @@ let max l = List.fold_left (fun acc x -> if x > acc then x else acc) l
 let z = "..."
 
 let test x y =
-  let w =
+  let fun_name2 = Fun.id in
+  let m =
     let m = print_endline (x ^ y ^ z) in
     m
   in
-  w
+  m
 
 let _ = assert false
