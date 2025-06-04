@@ -175,31 +175,33 @@ let extract_to_toplevel name expr gen_let_binding buffer ~expr_env ~exp_loc
     |> Format.asprintf "%a" Pprintast.structure_item
   in
   let toplevel_item = buffer_sub_loc buffer toplevel_item_loc in
-  let substitued_toplevel_item =
-    let loc =
-      let start_lnum =
-        1 + exp_loc.Location.loc_start.pos_lnum
-        - toplevel_item_loc.loc_start.pos_lnum
-      in
-      { exp_loc with
-        loc_start = { exp_loc.loc_start with pos_lnum = start_lnum };
-        loc_end =
-          { exp_loc.loc_end with
-            pos_lnum =
-              start_lnum + exp_loc.loc_end.pos_lnum - exp_loc.loc_start.pos_lnum
-          }
-      }
+  let subst_loc =
+    let start_lnum =
+      1 + exp_loc.Location.loc_start.pos_lnum
+      - toplevel_item_loc.loc_start.pos_lnum
     in
+    { exp_loc with
+      loc_start = { exp_loc.loc_start with pos_lnum = start_lnum };
+      loc_end =
+        { exp_loc.loc_end with
+          pos_lnum =
+            start_lnum + exp_loc.loc_end.pos_lnum - exp_loc.loc_start.pos_lnum
+        }
+    }
+  in
+
+  let substitued_toplevel_item =
     Msource.substitute toplevel_item
-      (logical_of_loc loc.loc_start)
-      (logical_of_loc loc.loc_end)
+      (logical_of_loc subst_loc.loc_start)
+      (logical_of_loc subst_loc.loc_end)
       val_name
     |> Msource.text
   in
-  let inserted = fresh_let_binding ^ "\n" ^ substitued_toplevel_item in
-  [ Query_protocol.Deletion toplevel_item_loc;
-    Query_protocol.Addition (toplevel_item_loc, inserted)
-  ]
+  let content = fresh_let_binding ^ "\n" ^ substitued_toplevel_item in
+  { Query_protocol.loc = toplevel_item_loc;
+    content;
+    selection_range = subst_loc
+  }
 
 let extract_const_to_toplevel ?extract_name const =
   let name =
@@ -249,7 +251,7 @@ let select_suitable_expr ~start ~stop nodes =
   nodes |> List.rev
   |> List.find_map (fun (env, node) -> select_among_child env node)
 
-let diffs ~start ~stop ?extract_name buffer structure =
+let substitute ~start ~stop ?extract_name buffer structure =
   let enclosing = Mbrowse.enclosing start [ Mbrowse.of_structure structure ] in
   match select_suitable_expr ~start ~stop enclosing with
   | None -> failwith "nothing to do"
@@ -273,18 +275,12 @@ let diffs ~start ~stop ?extract_name buffer structure =
         ?extract_name ~expr_env ~exp_loc ~toplevel_item_loc
   end
 
-(* Récupérer localisation des vars de l'expression toplevel extraite (voir analysis/locate.ml)
+(* Trouver les variables libres :
+  Récupérer localisation des vars de l'expression toplevel extraite (voir analysis/locate.ml)
+  Si la loc est en dehors du buffer -> pas libre
+  Si la loc est au dessus de l'expression toplevel extraite -> libre
+  Sinon tout ce qui est compris dans l'enclosing -> variable libre *)
 
-Si la loc est en dehors du buffer -> pas libre
-Si la loc est au dessus de l'expression toplevel extraite -> libre
-Sinon tout ce qui est compris dans l'enclosing -> variable libre *)
+(* Ajouter test récursion mutuelle *)
 
-(* ajouter test récursion mutuelle *)
-
-(* renvoyer:
-  - target_name
-  - location à highlight
-  - location à remplacer
-  - contenu *)
-
-(* supprimer la génération de valeur quand le nom donné est une string. *)
+(* Fixer selection range -> renvoyer localisation à l'échelle du buffer et fixer test. *)

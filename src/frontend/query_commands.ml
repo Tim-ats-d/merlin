@@ -818,10 +818,11 @@ let dispatch pipeline (type a) : a Query_protocol.t -> a = function
     let typer_result = Mpipeline.typer_result pipeline in
     begin
       match Mtyper.get_typedtree typer_result with
-      | `Interface _ -> []
+      | `Interface _ -> None
       | `Implementation structure ->
-        Refactor_extract_region.diffs ~start ~stop ?extract_name buffer
-          structure
+        Some
+          (Refactor_extract_region.substitute ~start ~stop ?extract_name buffer
+             structure)
     end
   | Signature_help { position; _ } -> (
     (* Todo: additionnal contextual information could help us provide better

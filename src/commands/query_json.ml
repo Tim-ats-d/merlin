@@ -409,11 +409,19 @@ let json_of_search_result list =
   in
   `List list
 
-let json_of_diff = function
-  | Addition (loc, content) ->
+let json_of_substitution_result subst_res =
+  match subst_res with
+  | None -> `Assoc []
+  | Some { loc; content; selection_range } ->
     with_location loc
-      [ ("kind", `String "addition"); ("content", `String content) ]
-  | Deletion loc -> with_location loc [ ("kind", `String "deletion") ]
+      [ ("content", `String content);
+        ( "selection-range",
+          `Assoc
+            [ ( "start",
+                Lexing.json_of_position selection_range.Location.loc_start );
+              ("end", Lexing.json_of_position selection_range.loc_end)
+            ] )
+      ]
 
 let json_of_response (type a) (query : a t) (response : a) : json =
   match (query, response) with
@@ -429,7 +437,8 @@ let json_of_response (type a) (query : a t) (response : a) : json =
     `List
       (List.map locations ~f:(fun (name, loc) ->
            with_location loc [ ("content", `String name) ]))
-  | Refactor_extract_region _, diffs -> `List (List.map diffs ~f:json_of_diff)
+  | Refactor_extract_region _, subst_res ->
+    json_of_substitution_result subst_res
   | Document _, resp -> begin
     match resp with
     | `No_documentation -> `String "No documentation available"
@@ -509,7 +518,7 @@ let json_of_response (type a) (query : a t) (response : a) : json =
   | Occurrences (_, scope), (occurrences, _project) ->
     let with_file = scope = `Project || scope = `Renaming in
     `List
-      (List.map occurrences ~f:(fun occurrence ->
+      (List.map occurrences ~f:(fun (occurrence : Query_protocol.occurrence) ->
            with_location ~with_file occurrence.loc
              [ ("stale", Json.bool occurrence.is_stale) ]))
   | Signature_help _, s -> json_of_signature_help s
