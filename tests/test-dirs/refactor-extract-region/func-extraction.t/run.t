@@ -41,7 +41,7 @@
         "line": 10,
         "col": 70
       },
-      "content": "let fun_name2 acc x = if x > acc then x else acc
+      "content": "let fun_name2 (acc) (x) = if x > acc then x else acc
   let max l = List.fold_left fun_name2 l",
       "selection-range": {
         "start": {
@@ -62,52 +62,18 @@
     "class": "return",
     "value": {
       "start": {
-        "line": 14,
+        "line": 17,
         "col": 0
       },
       "end": {
-        "line": 20,
+        "line": 17,
         "col": 3
       },
-      "content": "let fun_name3 () = print_endline (x ^ (y ^ z))
+      "content": "let fun_name3 (x) (y) = print_endline (x ^ (y ^ z))
   let test x y =
     let fun_name2 = Fun.id in
     let m =
       let m = fun_name3 in
-      m
-    in
-    m",
-      "selection-range": {
-        "start": {
-          "line": 4,
-          "col": 12
-        },
-        "end": {
-          "line": 4,
-          "col": 37
-        }
-      }
-    },
-    "notifications": []
-  }
-
-  $ $MERLIN single refactoring-extract-region -start 17:12 -end 17:37 < func.ml
-  {
-    "class": "return",
-    "value": {
-      "start": {
-        "line": 14,
-        "col": 0
-      },
-      "end": {
-        "line": 20,
-        "col": 3
-      },
-      "content": "let fun_name3 x y = print_endline (x ^ (y ^ z))
-  let test x y =
-    let fun_name2 = Fun.id in
-    let m =
-      let m = fun_name3 x y in
       m
     in
     m",
