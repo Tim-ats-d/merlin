@@ -14,19 +14,19 @@
   let circle_area radius = pi *. (radius ** 2.)",
       "selection-range": {
         "start": {
-          "line": 1,
-          "col": 25
+          "line": 3,
+          "col": 4
         },
         "end": {
-          "line": 1,
-          "col": 32
+          "line": 3,
+          "col": 6
         }
       }
     },
     "notifications": []
   }
 
-  $ $MERLIN single refactoring-extract-region -start 5:24 -end 5:28 < const.ml
+  $ $MERLIN single refactoring-extract-region -start 5:24 -end 5:28 -extract-name chunk_size < const.ml
   {
     "class": "return",
     "value": {
@@ -38,18 +38,18 @@
         "line": 7,
         "col": 46
       },
-      "content": "let const_name2 = 4096
-  let read ?(chunk_size = const_name2) ic =
+      "content": "let chunk_size = 4096
+  let read ?(chunk_size = chunk_size) ic =
     let buf = Bytes.create chunk_size in
     In_channel.input ic buf 0 (Bytes.length buf)",
       "selection-range": {
         "start": {
-          "line": 1,
-          "col": 24
+          "line": 5,
+          "col": 4
         },
         "end": {
-          "line": 1,
-          "col": 28
+          "line": 5,
+          "col": 14
         }
       }
     },
@@ -86,19 +86,19 @@
     o",
       "selection-range": {
         "start": {
-          "line": 6,
-          "col": 18
+          "line": 10,
+          "col": 4
         },
         "end": {
-          "line": 6,
-          "col": 32
+          "line": 10,
+          "col": 15
         }
       }
     },
     "notifications": []
   }
 
-  $ $MERLIN single refactoring-extract-region -start 26:46 -end 26:58 < const.ml
+  $ $MERLIN single refactoring-extract-region -start 26:46 -end 26:58 -extract-name header_log < const.ml
   {
     "class": "return",
     "value": {
@@ -110,16 +110,16 @@
         "line": 26,
         "col": 65
       },
-      "content": "let const_name2 = \"CRITICAL: \"
-  let log ppf msg = Format.pp_print_string ppf (const_name2 ^ msg)",
+      "content": "let header_log = \"CRITICAL: \"
+  let log ppf msg = Format.pp_print_string ppf (header_log ^ msg)",
       "selection-range": {
         "start": {
-          "line": 1,
-          "col": 46
+          "line": 26,
+          "col": 4
         },
         "end": {
-          "line": 1,
-          "col": 58
+          "line": 26,
+          "col": 14
         }
       }
     },
@@ -146,19 +146,19 @@
     end)",
       "selection-range": {
         "start": {
-          "line": 4,
-          "col": 33
+          "line": 29,
+          "col": 4
         },
         "end": {
-          "line": 4,
-          "col": 36
+          "line": 29,
+          "col": 15
         }
       }
     },
     "notifications": []
   }
 
-  $ $MERLIN single refactoring-extract-region -start 36:23 -end 40:5 < const.ml
+  $ $MERLIN single refactoring-extract-region -start 36:23 -end 40:5 -extract-name my_essay < const.ml
   {
     "class": "return",
     "value": {
@@ -170,22 +170,22 @@
         "line": 41,
         "col": 30
       },
-      "content": "let const_name2 = {foo|
+      "content": "let my_essay = {foo|
   multi
   lines
   constant
   |foo}
   let g () =
-    let multilines_cst = const_name2 in
+    let multilines_cst = my_essay in
     print_endline multilines_cst",
       "selection-range": {
         "start": {
-          "line": 2,
-          "col": 23
+          "line": 35,
+          "col": 4
         },
         "end": {
-          "line": 6,
-          "col": 5
+          "line": 35,
+          "col": 12
         }
       }
     },

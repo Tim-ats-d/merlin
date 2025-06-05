@@ -1,3 +1,5 @@
+module Lexing = Std.Lexing
+
 module FreshName = struct
   (* Generate a fresh name that does not already exists in given environment. *)
   let gen_val_name basename env =
@@ -55,12 +57,12 @@ module Gen = struct
     toplevel_let_binding name body
 end
 
-let concat_set f children =
-  List.fold_left
-    (fun acc child -> f child |> Path.Set.union acc)
-    Path.Set.empty children
-
 let free_variables node env ~toplevel_parent_item =
+  let concat_set f children =
+    List.fold_left
+      (fun acc child -> f child |> Path.Set.union acc)
+      Path.Set.empty children
+  in
   let rec find_pattern_var : type a. a Typedtree.general_pattern -> Path.Set.t =
    fun { Typedtree.pat_desc; _ } ->
     match pat_desc with
@@ -121,7 +123,7 @@ let free_variables node env ~toplevel_parent_item =
     None
     (* TODO: find it *)
   in
-  let () =
+  (* let () =
     prerr_endline "Mentionned";
     Path.Set.iter
       (fun p ->
@@ -131,20 +133,20 @@ let free_variables node env ~toplevel_parent_item =
           (is_free (start_stamp, stop_stamp) var_stamp)
         |> prerr_endline)
       vars
-  in
+  in *)
   Path.Set.to_list vars
   |> List.filter (fun var_path ->
          let var_stamp = Path.head var_path |> Ident.stamp in
          not (is_free (start_stamp, stop_stamp) var_stamp))
 
 let logical_of_loc loc =
-  let line, col = Std.Lexing.split_pos loc in
+  let line, col = Lexing.split_pos loc in
   `Logical (line, col)
 
 (* Maybe add this in [Msource]? *)
 let buffer_sub_loc buf loc =
   let (`Offset start_offset) =
-    let line, col = Std.Lexing.split_pos loc.Location.loc_start in
+    let line, col = Lexing.split_pos loc.Location.loc_start in
     Msource.get_offset buf (`Logical (line, col))
   in
   let (`Offset end_offset) =
@@ -186,8 +188,15 @@ let extract_to_toplevel name expr gen_let_binding buffer ~expr_env ~exp_loc
     |> Msource.text
   in
   let selection_range =
-    exp_loc
-    (* TODO: fix tests on this and this *)
+    let let_length = String.length "let " in
+    { Location.loc_start =
+        Lexing.make_pos (toplevel_item_loc.loc_start.pos_lnum, let_length);
+      loc_end =
+        Lexing.make_pos
+          ( toplevel_item_loc.loc_start.pos_lnum,
+            let_length + String.length val_name );
+      loc_ghost = false
+    }
   in
   let content = fresh_let_binding ^ "\n" ^ substitued_toplevel_item in
   { Query_protocol.loc = toplevel_item_loc; content; selection_range }
@@ -280,5 +289,4 @@ let substitute ~start ~stop ?extract_name buffer structure =
   Sinon tout ce qui est compris dans l'enclosing -> variable libre *)
 
 (* Ajouter test récursion mutuelle *)
-(* Fixer selection range -> renvoyer localisation à l'échelle du buffer et fixer test. *)
-(* Generate function call adapted to the extracted expr. *)
+(* Generate and substitute the function call adapted to the extracted expr. *)

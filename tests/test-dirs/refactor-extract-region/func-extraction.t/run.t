@@ -1,4 +1,4 @@
-  $ $MERLIN single refactoring-extract-region -start 5:4 -end 7:19 < func.ml
+  $ $MERLIN single refactoring-extract-region -start 5:4 -end 7:19 -extract-name is_empty < func.ml
   {
     "class": "return",
     "value": {
@@ -10,10 +10,10 @@
         "line": 8,
         "col": 5
       },
-      "content": "let fun_name2 = function | [] -> true | _ -> false
+      "content": "let is_empty = function | [] -> true | _ -> false
   let all_empty l =
     List.for_all
-      fun_name2
+      is_empty
       l",
       "selection-range": {
         "start": {
@@ -21,8 +21,8 @@
           "col": 4
         },
         "end": {
-          "line": 5,
-          "col": 19
+          "line": 3,
+          "col": 12
         }
       }
     },
@@ -45,12 +45,12 @@
   let max l = List.fold_left fun_name2 l",
       "selection-range": {
         "start": {
-          "line": 1,
-          "col": 27
+          "line": 10,
+          "col": 4
         },
         "end": {
-          "line": 1,
-          "col": 68
+          "line": 10,
+          "col": 13
         }
       }
     },
@@ -62,11 +62,11 @@
     "class": "return",
     "value": {
       "start": {
-        "line": 17,
+        "line": 14,
         "col": 0
       },
       "end": {
-        "line": 17,
+        "line": 20,
         "col": 3
       },
       "content": "let fun_name3 (x) (y) = print_endline (x ^ (y ^ z))
@@ -79,12 +79,12 @@
     m",
       "selection-range": {
         "start": {
-          "line": 4,
-          "col": 12
+          "line": 14,
+          "col": 4
         },
         "end": {
-          "line": 4,
-          "col": 37
+          "line": 14,
+          "col": 13
         }
       }
     },
