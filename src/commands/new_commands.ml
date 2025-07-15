@@ -565,6 +565,19 @@ let all_commands =
           | Some action, (#Msource.position as pos) ->
             run buffer (Query_protocol.Refactor_open (action, pos))
       end;
+    command "refactoring-wrap-type-inside-mod"
+      ~doc:"refactoring-wrap-type-inside-mod -position pos"
+      ~spec:
+        [ arg "-position" "<position> Position to complete"
+            (marg_position (fun pos _pos -> pos))
+        ]
+      ~default:`None
+      begin
+        fun buffer -> function
+          | `None -> failwith "-position is mandatory"
+          | #Msource.position as pos ->
+            run buffer (Query_protocol.Refactor_wrap_type_inside_mod pos)
+      end;
     command "search-by-polarity"
       ~doc:"search-by-polarity -position pos -query ident\n\tTODO"
       ~spec:

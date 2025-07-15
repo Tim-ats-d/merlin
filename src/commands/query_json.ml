@@ -211,6 +211,8 @@ let dump (type a) : a t -> json =
             | `Unqualify -> "unqualify") );
         ("position", mk_position pos)
       ]
+  | Refactor_wrap_type_inside_mod pos ->
+    mk "refactoring-wrap-type-inside-mod" [ ("pos", mk_position pos) ]
   | Signature_help { position; _ } ->
     mk "signature-help" [ ("position", mk_position position) ]
   | Version -> mk "version" []
@@ -408,6 +410,9 @@ let json_of_search_result list =
   in
   `List list
 
+let json_of_substitution_result { loc; content } =
+  with_location loc [ ("content", `String content) ]
+
 let json_of_response (type a) (query : a t) (response : a) : json =
   match (query, response) with
   | Type_expr _, str -> `String str
@@ -422,6 +427,8 @@ let json_of_response (type a) (query : a t) (response : a) : json =
     `List
       (List.map locations ~f:(fun (name, loc) ->
            with_location loc [ ("content", `String name) ]))
+  | Refactor_wrap_type_inside_mod _, subst_res ->
+    json_of_substitution_result subst_res
   | Document _, resp -> begin
     match resp with
     | `No_documentation -> `String "No documentation available"
@@ -501,7 +508,7 @@ let json_of_response (type a) (query : a t) (response : a) : json =
   | Occurrences (_, scope), (occurrences, _project) ->
     let with_file = scope = `Project || scope = `Renaming in
     `List
-      (List.map occurrences ~f:(fun occurrence ->
+      (List.map occurrences ~f:(fun (occurrence : occurrence) ->
            with_location ~with_file occurrence.loc
              [ ("stale", Json.bool occurrence.is_stale) ]))
   | Signature_help _, s -> json_of_signature_help s

@@ -133,6 +133,8 @@ type occurrences_status =
 
 type occurrence = { loc : Location.t; is_stale : bool }
 
+type substitution_result = { loc : Location.t; content : string }
+
 type _ t =
   | Type_expr (* *) : string * Msource.position -> string t
   | Type_enclosing (* *) :
@@ -158,6 +160,7 @@ type _ t =
   | Refactor_open :
       [ `Qualify | `Unqualify ] * Msource.position
       -> (string * Location.t) list t
+  | Refactor_wrap_type_inside_mod : Msource.position -> substitution_result t
   | Document (* *) :
       string option * Msource.position
       -> [ `Found of string

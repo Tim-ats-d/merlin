@@ -453,6 +453,12 @@ let dispatch pipeline (type a) : a Query_protocol.t -> a = function
     let typer = Mpipeline.typer_result pipeline in
     let pos = Mpipeline.get_lexing_pos pipeline pos in
     Refactor_open.get_rewrites ~mode typer pos
+  | Refactor_wrap_type_inside_mod pos ->
+    let pos = Mpipeline.get_lexing_pos pipeline pos in
+    let typer_result =
+      Mpipeline.typer_result pipeline |> Mtyper.get_typedtree
+    in
+    Refactor_type_inside_mod.wrap ~pos typer_result
   | Document (patho, pos) ->
     let typer = Mpipeline.typer_result pipeline in
     let local_defs = Mtyper.get_typedtree typer in
