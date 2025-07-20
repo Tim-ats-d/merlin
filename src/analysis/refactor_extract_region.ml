@@ -148,7 +148,8 @@ let rec occuring_vars node =
       |> List.concat_map ~f:occuring_vars
       |> List.append acc
   in
-  loop [] node |> List.rev
+  loop [] node |> Path.Set.of_list |> Path.Set.elements |> List.rev
+  |> List.filter ~f:(fun path -> Ident.name (Path.head path) <> "Stdlib")
 
 let analyze_expr expr env ~toplevel_item ~mconfig ~local_defs =
   let unbounded_enclosing =
@@ -159,9 +160,31 @@ let analyze_expr expr env ~toplevel_item ~mconfig ~local_defs =
   in
   Browse_tree.of_node ~env (Browse_raw.Expression expr)
   |> occuring_vars
+  (* |> 
+  (fun l ->
+  List.iter
+    ~f:(fun p ->
+      let name = Path.last p in
+      Printf.eprintf "Var: %S\n" name)
+    l;
+  l) *)
   |> List.fold_left
        ~init:{ bounded_vars = []; gen_binding_kind = Non_recursive }
        ~f:(fun acc var_path ->
+         let is_unbound =
+           try
+             let _ = Env.find_value var_path env in
+             false
+           with Not_found -> true
+         in
+         let () =
+           if is_unbound && Ident.name (Path.head var_path) <> "Stdlib" then begin
+             ()
+             (* let name = Path.last var_path in
+             Printf.eprintf "Unbound: %S\n" name *)
+           end
+           else ()
+         in
          match
            Locate.from_path
              ~config:{ mconfig; ml_or_mli = `ML; traverse_aliases = true }
@@ -307,6 +330,17 @@ let extract_expr_to_toplevel ?extract_name expr ~expr_env ~toplevel_item
       generated_call
     }
 
+let remove_poly expr =
+  let open Typedtree in
+  { expr with
+    exp_extra =
+      List.filter
+        ~f:(function
+          | Texp_poly _, _, _ -> false
+          | _ -> true)
+        expr.exp_extra
+  }
+
 let most_inclusive_expr ~start ~stop nodes =
   let is_inside_region =
     Location_aux.included
@@ -320,31 +354,22 @@ let most_inclusive_expr ~start ~stop nodes =
              select_among_child node.Browse_tree.t_env node.t_node)
     in
     let node_loc = Mbrowse.node_loc node in
-    let remove_poly expr =
-      (* We have to remove poly extra that cause unexpected "!poly!" to be printed
-         in generated code. This happens when you try to extract the body of a method. *)
-      let open Typedtree in
-      { expr with
-        exp_extra =
-          List.filter
-            ~f:(function
-              | Texp_poly _, _, _ -> false
-              | _ -> true)
-            expr.exp_extra
-      }
-    in
     match node with
-    | Expression expr ->
+    | Expression expr
+      when node_loc.loc_ghost = false && is_inside_region node_loc ->
       (* We filter expression that have a ghost location. Otherwise, expression
         such as [let f x = 10 + x] can be extracted and this can lead to invalid 
         code gen.      ^^^^^^^^^^ *)
-      if node_loc.loc_ghost = false && is_inside_region node_loc then
-        Some (remove_poly expr, env)
-      else select_deeper node env
+      Some (expr, env)
     | _ -> select_deeper node env
   in
   nodes |> List.rev
   |> Stdlib.List.find_map (fun (env, node) -> select_among_child env node)
+  |> Option.map ~f:(fun (expr, env) ->
+         (* We also have to remove poly extra that cause unexpected "!poly!"
+         to be printed in generated code. This happens when you try to extract
+         the body of a method. *)
+         (remove_poly expr, env))
 
 let find_associated_toplevel_item expr structure =
   Stdlib.List.find_map
@@ -367,6 +392,7 @@ let find_associated_toplevel_item expr structure =
 let extract_region ~start ~stop enclosing structure =
   let open Option.Infix in
   most_inclusive_expr ~start ~stop enclosing >>= fun (expr, expr_env) ->
+  (* si contenu de l'expr contient une expression local alors inextrayable *)
   find_associated_toplevel_item expr structure >>| fun toplevel_item ->
   (expr, expr_env, toplevel_item)
 
