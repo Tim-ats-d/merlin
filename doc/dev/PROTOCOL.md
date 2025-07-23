@@ -485,6 +485,21 @@ The result is returned as a list of:
 }
 ```
 
+### `refactor-wrap-type-inside-mod -postion <position>`
+
+```
+-position <position>  Position where to wrap a type declaration
+```
+
+Returns the string `Nothing to do` (if position is not inside a type declaration) or the following object:
+```javascript
+{
+  'start': position, // the start of the region to be substituted
+  'end': position, // the end of the region to be substituted
+  'content' string, // the content of the substitution
+}
+```
+
 ### `syntax-document -position <position>`
 
 	-position <position>  The position of the keyword to be documented

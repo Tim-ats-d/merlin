@@ -212,7 +212,7 @@ let dump (type a) : a t -> json =
         ("position", mk_position pos)
       ]
   | Refactor_wrap_type_inside_mod pos ->
-    mk "refactoring-wrap-type-inside-mod" [ ("pos", mk_position pos) ]
+    mk "refactor-wrap-type-inside-mod" [ ("pos", mk_position pos) ]
   | Signature_help { position; _ } ->
     mk "signature-help" [ ("position", mk_position position) ]
   | Version -> mk "version" []

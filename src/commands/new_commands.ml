@@ -565,8 +565,8 @@ let all_commands =
           | Some action, (#Msource.position as pos) ->
             run buffer (Query_protocol.Refactor_open (action, pos))
       end;
-    command "refactoring-wrap-type-inside-mod"
-      ~doc:"refactoring-wrap-type-inside-mod -position pos"
+    command "refactor-wrap-type-inside-mod"
+      ~doc:"refactor-wrap-type-inside-mod -position pos"
       ~spec:
         [ arg "-position" "<position> Position to complete"
             (marg_position (fun pos _pos -> pos))

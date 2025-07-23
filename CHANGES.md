@@ -1,3 +1,9 @@
+unreleased
+==========
+
+  + merlin library
+    - Implement new refactor-wrap-type-inside-mod command for wrapping a type inside a fresh module (#?)
+
 merlin 5.5
 ==========
 Tue Jun 24 16:10:42 CEST 2025
