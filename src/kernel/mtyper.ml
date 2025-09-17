@@ -417,19 +417,25 @@ let run config position shared parsetree =
       cache_stat
     }
   in
-
-  match
-    match parsetree with
-    | `Implementation parsetree ->
-      type_implementation config caught position shared parsetree
-    | `Interface parsetree ->
-      type_interface config caught position shared parsetree
-  with
-  | cached_result, cache_stat -> aux cached_result cache_stat
-  | effect Internal_partial (cached_result, cache_stat), k ->
-    let r = aux cached_result cache_stat in
-    perform (Partial r);
-    continue k ()
+  match_with
+    (function
+      | `Implementation parsetree ->
+        type_implementation config caught position shared parsetree
+      | `Interface parsetree ->
+        type_interface config caught position shared parsetree)
+    parsetree
+    { retc = (fun (cached_result, cache_stat) -> aux cached_result cache_stat);
+      exnc = raise;
+      effc = fun (type a) (eff : a Effect.t) ->
+        match eff with
+        | Internal_partial (cached_result, cache_stat) ->
+          Some (fun (k : (a, _) Effect.Deep.continuation) ->
+            let r = aux cached_result cache_stat in
+            perform (Partial r);
+            continue k ()
+          )
+        | _ -> None
+    }
 
 let get_env ?pos:_ t =
   Option.value ~default:t.initial_env

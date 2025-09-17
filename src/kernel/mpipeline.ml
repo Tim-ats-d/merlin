@@ -306,38 +306,43 @@ let process ?position ?state ?(pp_time = ref 0.0) ?(reader_time = ref 0.0)
   let typer_has_been_shared = ref false in
 
   let typer =
-    match
+    Effect.Deep.match_with (fun () ->
       timed typer_time (fun () ->
-          let { Ppx.config; parsetree; _ } = ppx in
-          Mocaml.setup_typer_config config;
-          let result = Mtyper.(run config position shared parsetree) in
-          save_stats_and_return_typer result)
-    with
-    | res -> res
-    | effect Mtyper.(Partial result), k ->
-      let typer = save_stats_and_return_typer result in
-      let mpipeline =
-        { config;
-          state;
-          raw_source;
-          source;
-          reader;
-          ppx;
-          typer;
-          pp_time;
-          reader_time;
-          ppx_time;
-          typer_time;
-          error_time;
-          ppx_cache_hit;
-          reader_cache_hit;
-          typer_cache_stats = typer.cache_stat
-        }
-      in
-      Shared.put_ack shared.msg (Result mpipeline);
-      typer_has_been_shared := true;
-      (* Back to [Mtyper.run] *)
-      Effect.Deep.continue k ()
+        let { Ppx.config; parsetree; _ } = ppx in
+        Mocaml.setup_typer_config config;
+        let result = Mtyper.(run config position shared parsetree) in
+          save_stats_and_return_typer result))
+      ()
+      { retc = Fun.id;
+        exnc = raise;
+        effc = fun (type a) (eff : a Effect.t) ->
+          match eff with
+          | Mtyper.Partial result ->
+            Some (fun (k : (a, _) Effect.Deep.continuation) ->
+              let typer = save_stats_and_return_typer result in
+              let mpipeline =
+                { config;
+                  state;
+                  raw_source;
+                  source;
+                  reader;
+                  ppx;
+                  typer;
+                  pp_time;
+                  reader_time;
+                  ppx_time;
+                  typer_time;
+                  error_time;
+                  ppx_cache_hit;
+                  reader_cache_hit;
+                  typer_cache_stats = typer.cache_stat
+                }
+              in
+              Shared.put_ack shared.msg (Result mpipeline);
+              typer_has_been_shared := true;
+              (* Back to [Mtyper.run] *)
+              Effect.Deep.continue k ())
+            | _ -> None }
   in
   if !typer_has_been_shared then None
   else

@@ -28,6 +28,7 @@
   ocaml_typing
   merlin_specific
   merlin_config
+  merlin_extend
   merlin_analysis
   merlin_sherlodoc
   query_protocol
