@@ -35,7 +35,7 @@ type stat = { mtime : float; size : int; source_digest : string option }
 type index =
   { defs : Lid_set.t Uid_map.t;
     approximated : Lid_set.t Uid_map.t;
-    cu_shape : (string, Shape.t) Hashtbl.t;
+    cu_shape : (Compilation_unit.t, Shape.t) Hashtbl.t;
     stats : stat Stats.t;
     root_directory : string option;
     related_uids : Union_find.t Uid_map.t
@@ -121,7 +121,10 @@ let pp (fmt : Format.formatter) pl =
     (Uid_map.cardinal pl.approximated)
     pp_partials pl.approximated;
   Format.fprintf fmt "and shapes for CUS %s.@ "
-    (String.concat ";@," (Hashtbl.to_seq_keys pl.cu_shape |> List.of_seq));
+    (String.concat ";@,"
+       (Hashtbl.to_seq_keys pl.cu_shape
+       |> List.of_seq
+       |> List.map Compilation_unit.full_path_as_string));
   Format.fprintf fmt "and related uids:@[{%a}@]" pp_related_uids pl.related_uids
 
 let ext = "ocaml-index"
@@ -135,7 +138,11 @@ let write ~file index =
       output_string oc magic_number;
       Granular_marshal.write oc index_schema (index : index))
 
-type file_content = Cmt of Cmt_format.cmt_infos | Index of index | Unknown
+type file_content =
+  | Cmt of Cmt_format.cmt_infos
+  | Cms of Cms_format.cms_infos
+  | Index of index
+  | Unknown
 
 let read ~file =
   let ic = open_in_bin file in
@@ -145,11 +152,14 @@ let read ~file =
       let file_magic_number = ref (Cmt_format.read_magic_number ic) in
       let cmi_magic_number = Ocaml_utils.Config.cmi_magic_number in
       let cmt_magic_number = Ocaml_utils.Config.cmt_magic_number in
+      let cms_magic_number = Ocaml_utils.Config.cms_magic_number in
       (if String.equal !file_magic_number cmi_magic_number then
          let _ = Cmi_format.input_cmi ic in
-         file_magic_number := Cmt_format.read_magic_number ic);
+         file_magic_number := Cms_format.read_magic_number ic);
       if String.equal !file_magic_number cmt_magic_number then
         Cmt (input_value ic : Cmt_format.cmt_infos)
+      else if String.equal !file_magic_number cms_magic_number then
+        Cms (input_value ic : Cms_format.cms_infos)
       else if String.equal !file_magic_number magic_number then
         Index (Granular_marshal.read file ic index_schema)
       else Unknown)

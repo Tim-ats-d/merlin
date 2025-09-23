@@ -19,10 +19,7 @@ let rec normalize_path env path =
     match decl.Types.type_manifest with
     | Some body
       when decl.Types.type_private = Asttypes.Public
-           ||
-           match decl.Types.type_kind with
-           | Types.Type_abstract _ -> false
-           | _ -> true -> begin
+           || not (Btype.type_kind_is_abstract decl) -> begin
       match Types.get_desc body with
       | Types.Tconstr (path, _, _) -> normalize_path env path
       | _ -> path
@@ -50,9 +47,15 @@ let match_query env query t =
       end
     | Types.Tarrow (_, t1, t2, _) ->
       decr pos_fun;
+      let t1 =
+        match Types.get_desc t1 with
+        | Tpoly (t1, []) -> t1
+        | _ -> t1
+      in
       traverse neg neg_fun pos pos_fun t2;
       traverse pos pos_fun neg neg_fun t1
-    | Types.Ttuple ts -> List.iter ~f:(traverse neg neg_fun pos pos_fun) ts
+    | Types.Ttuple ts ->
+      List.iter ~f:(fun (_label, t) -> traverse neg neg_fun pos pos_fun t) ts
     | Types.Tvar _ | Types.Tunivar _ -> decr cost (* Favor polymorphic defs *)
     | _ -> ()
   in
@@ -126,8 +129,10 @@ let directories ~global_modules env =
 
 let execute_query query env dirs =
   let direct dir acc =
+    (* TODO: Merlin modes *)
     Env.fold_values
-      (fun _ path desc acc ->
+      (fun _ path desc _mode acc ->
+        let desc = Subst.Lazy.force_value_description desc in
         match match_query env query desc.Types.val_type with
         | Some cost -> (cost, path, desc) :: acc
         | None -> acc)

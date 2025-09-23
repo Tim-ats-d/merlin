@@ -16,6 +16,8 @@
 open Format_doc
 open Outcometree
 
+module Misc = Misc_stdlib
+
 exception Ellipsis
 
 let cautious f ppf arg =
@@ -34,6 +36,8 @@ let rec print_ident ppf =
       print_ident ppf id; pp_print_char ppf '.'; print_lident ppf s
   | Oide_apply (id1, id2) ->
       fprintf ppf "%a(%a)" print_ident id1 print_ident id2
+  | Oide_hash id ->
+      print_ident ppf id; pp_print_char ppf '#'
 
 let out_ident = ref print_ident
 
@@ -122,6 +126,47 @@ let escape_string s =
     Bytes.to_string s'
   end
 
+let rec print_typlist print_elem sep ppf =
+  function
+    [] -> ()
+  | [ty] -> print_elem ppf ty
+  | ty :: tyl ->
+      print_elem ppf ty;
+      pp_print_string ppf sep;
+      pp_print_space ppf ();
+      print_typlist print_elem sep ppf tyl
+
+let print_label_type ppf =
+  function
+  | Some s ->
+    pp_print_string ppf s;
+    pp_print_string ppf ":";
+  | None -> ()
+
+let print_label ppf =
+  function
+  | Some s ->
+    pp_print_string ppf "~";
+    pp_print_string ppf s;
+    pp_print_string ppf ":";
+  | None -> ()
+
+let rec print_labeled_typlist print_elem sep ppf =
+  function
+    [] -> ()
+  | [label, ty] ->
+      pp_open_box ppf 0;
+      print_label_type ppf label;
+      print_elem ppf ty;
+      pp_close_box ppf ()
+  | (label, ty) :: tyl ->
+      pp_open_box ppf 0;
+      print_label_type ppf label;
+      print_elem ppf ty;
+      pp_close_box ppf ();
+      pp_print_string ppf sep;
+      pp_print_space ppf ();
+      print_labeled_typlist print_elem sep ppf tyl
 
 let print_out_string ppf s =
   let not_escaped =
@@ -136,6 +181,11 @@ let print_out_string ppf s =
     fprintf ppf "\"%s\"" (escape_string s)
   else
     fprintf ppf "%S" s
+
+(* We cannot use the [float32] type in the compiler. *)
+external float32_format : string -> Obj.t -> string = "caml_format_float32"
+
+let float32_to_string f = Stdlib.valid_float_lexem (float32_format "%.9g" f)
 
 let print_constr ppf name =
   match name with
@@ -163,12 +213,17 @@ let print_out_value ppf tree =
     | tree -> print_simple_tree ppf tree
   and print_constr_param ppf = function
     | Oval_int i -> parenthesize_if_neg ppf "%i" i (i < 0)
+    | Oval_int8 i -> parenthesize_if_neg ppf "%is" i (i < 0)
+    | Oval_int16 i -> parenthesize_if_neg ppf "%iS" i (i < 0)
     | Oval_int32 i -> parenthesize_if_neg ppf "%lil" i (i < 0l)
     | Oval_int64 i -> parenthesize_if_neg ppf "%LiL" i (i < 0L)
     | Oval_nativeint i -> parenthesize_if_neg ppf "%nin" i (i < 0n)
     | Oval_float f ->
         parenthesize_if_neg ppf "%s" (float_repres f)
                                      (f < 0.0 || 1. /. f = neg_infinity)
+    | Oval_float32 f ->
+        let s = float32_to_string f in
+        parenthesize_if_neg ppf "%ss" s (String.starts_with ~prefix:"-" s)
     | Oval_string (_,_, Ostr_bytes) as tree ->
       pp_print_char ppf '(';
       print_simple_tree ppf tree;
@@ -177,10 +232,13 @@ let print_out_value ppf tree =
   and print_simple_tree ppf =
     function
       Oval_int i -> fprintf ppf "%i" i
+    | Oval_int8 i -> fprintf ppf "%is" i
+    | Oval_int16 i -> fprintf ppf "%iS" i
     | Oval_int32 i -> fprintf ppf "%lil" i
     | Oval_int64 i -> fprintf ppf "%LiL" i
     | Oval_nativeint i -> fprintf ppf "%nin" i
     | Oval_float f -> pp_print_string ppf (float_repres f)
+    | Oval_float32 f -> fprintf ppf "%ss" (float32_to_string f)
     | Oval_char c -> fprintf ppf "%C" c
     | Oval_string (s, maxlen, kind) ->
        begin try
@@ -200,17 +258,27 @@ let print_out_value ppf tree =
         end
     | Oval_list tl ->
         fprintf ppf "@[<1>[%a]@]" (print_tree_list print_tree_1 ";") tl
-    | Oval_array tl ->
-        fprintf ppf "@[<2>[|%a|]@]" (print_tree_list print_tree_1 ";") tl
+    | Oval_array (tl, am) ->
+        let sigil = match am with
+          | Mutable   -> '|'
+          | Immutable -> ':'
+        in
+        fprintf ppf "@[<2>[%c%a%c]@]"
+          sigil (print_tree_list print_tree_1 ";") tl sigil
     | Oval_constr (name, []) -> print_constr ppf name
     | Oval_variant (name, None) -> fprintf ppf "`%a" print_lident name
     | Oval_stuff s -> pp_print_string ppf s
     | Oval_record fel ->
         fprintf ppf "@[<1>{%a}@]" (cautious (print_fields true)) fel
+    | Oval_record_unboxed_product fel ->
+        fprintf ppf "@[<1>#{%a}@]" (cautious (print_fields true)) fel
     | Oval_ellipsis -> raise Ellipsis
     | Oval_printer f -> f ppf
     | Oval_tuple tree_list ->
-        fprintf ppf "@[<1>(%a)@]" (print_tree_list print_tree_1 ",") tree_list
+        fprintf ppf "@[<1>(%a)@]" (print_labeled_tree_list print_tree_1 ",") tree_list
+    | Oval_unboxed_tuple tree_list ->
+        fprintf ppf "@[<1>#(%a)@]" (print_labeled_tree_list print_tree_1 ",")
+          tree_list
     | tree -> fprintf ppf "@[<1>(%a)@]" (cautious print_tree_1) tree
   and print_fields first ppf =
     function
@@ -230,6 +298,17 @@ let print_out_value ppf tree =
           print_list false ppf tree_list
     in
     cautious (print_list true) ppf tree_list
+  and print_labeled_tree_list print_item sep ppf labeled_tree_list =
+    let rec print_list first ppf =
+      function
+        [] -> ()
+      | (label, tree) :: labeled_tree_list ->
+          if not first then fprintf ppf "%s@ " sep;
+          print_label ppf label;
+          print_item ppf tree;
+          print_list false ppf labeled_tree_list
+    in
+    cautious (print_list true) ppf labeled_tree_list
   in
   cautious print_tree_1 ppf tree
 
@@ -255,45 +334,155 @@ let pr_var = Pprintast.Doc.tyvar
 let ty_var ~non_gen ppf s =
   pr_var ppf (if non_gen then "_" ^ s else s)
 
-let pr_vars =
-  print_list pr_var (fun ppf -> fprintf ppf "@ ")
 
-let print_arg_label ppf (lbl : Asttypes.arg_label) =
+(* NON-LEGACY MODES
+  Here, we are printing mode annotations even if the mode extension is
+  disabled. Mode extension being disabled means mode annotations are
+  disallowed in parsing of this file, but non-legacy modes might still pop
+  up. For example, the current file might cite values from other files that
+  mention non-legacy modes *)
+let print_out_mode_legacy ppf = function
+  | Omd_local -> fprintf ppf "local_"
+
+let print_out_mode_new = pp_print_string
+
+let print_out_mode_legacy_space ppf m =
+  print_out_mode_legacy ppf m;
+  pp_print_space ppf ()
+
+let print_out_modes_legacy ppf l =
+  pp_print_list print_out_mode_legacy_space ppf l
+
+let print_out_modes_new ppf l =
+  (match l with
+  | [] -> ()
+  | _ -> pp_print_string ppf " @ ");
+  pp_print_list ~pp_sep:pp_print_space print_out_mode_new ppf l
+
+let partition_modes l =
+  List.partition_map
+    (function
+    | Omd_legacy m -> Left m
+    | Omd_new m -> Right m
+    ) l
+
+(* Labeled tuples with the first element labeled sometimes require parens. *)
+let is_initially_labeled_tuple ty =
+  match ty with
+  | Otyp_tuple ((Some _, _) :: _) -> true
+  | _ -> false
+
+let print_out_modality_legacy ppf = function
+  | Ogf_global -> Format.fprintf ppf "global_"
+
+let print_out_modality ppf = function
+  | Ogf_legacy m -> print_out_modality_legacy ppf m
+  | Ogf_new m -> pp_print_string ppf m
+
+let print_out_modalities_new ppf l =
+  match l with
+  | [] -> ()
+  | _ ->
+    pp_print_space ppf ();
+    pp_print_string ppf "@@";
+    pp_print_space ppf ();
+    pp_print_list ~pp_sep:pp_print_space pp_print_string ppf l
+
+let print_out_modalities_legacy =
+  pp_print_list
+  (fun ppf m ->
+    print_out_modality_legacy ppf m;
+    pp_print_space ppf ())
+
+let partition_modalities l =
+  List.partition_map (function
+  | Ogf_legacy m -> Left m
+  | Ogf_new m -> Right m
+  ) l
+
+let print_arg_label_and_out_type ppf (lbl : arg_label) ty ~print_type =
   match lbl with
-  | Nolabel -> ()
-  | Labelled s -> fprintf ppf "%a:" print_lident s
-  | Optional s -> fprintf ppf "?%a:" print_lident s
+  | Nolabel -> print_type ppf ty
+  | Labelled l -> fprintf ppf "%a:%a" print_lident l print_type ty
+  | Position l -> fprintf ppf "%a:[%%call_pos]" print_lident l
+  | Optional l -> fprintf ppf "?%a:%a" print_lident l print_type ty
 
-let rec print_out_type ppf =
+let rec print_out_type_0 ppf =
   function
   | Otyp_alias {non_gen; aliased; alias } ->
-      fprintf ppf "@[%a@ as %a@]"
-        print_out_type aliased
-        (ty_var ~non_gen) alias
+    fprintf ppf "@[%a@ as %a@]"
+      print_out_type_0 aliased
+      (ty_var ~non_gen) alias
+  | Otyp_poly ([], ty) ->
+      print_out_type_0 ppf ty  (* no "." if there are no vars *)
   | Otyp_poly (sl, ty) ->
       fprintf ppf "@[<hov 2>%a.@ %a@]"
-        pr_vars sl
-        print_out_type ty
+        pr_var_jkinds sl
+        print_out_type_0 ty
   | ty ->
       print_out_type_1 ppf ty
 
+(* We must parenthesize a labeled tuple with the first element labeled when:
+   - It is an argument to a function ([~arg])
+   - Or, there is at least one mode to print.
+ *)
+and print_out_type_mode ~arg mode ppf ty =
+  let m_legacy, m_new = partition_modes mode in
+  let has_modes =
+    match m_legacy with
+    | [] -> false
+    | _ -> true
+  in
+  let parens =
+    is_initially_labeled_tuple ty
+    && (arg || has_modes)
+  in
+  print_out_modes_legacy ppf m_legacy;
+  if parens then
+    pp_print_char ppf '(';
+  print_out_type_2 ppf ty;
+  if parens then
+    pp_print_char ppf ')';
+  print_out_modes_new ppf m_new
+
 and print_out_type_1 ppf =
   function
-    Otyp_arrow (lab, ty1, ty2) ->
+  | Otyp_arrow (lab, am, ty1, ty2) ->
       pp_open_box ppf 0;
-      print_arg_label ppf lab;
-      print_out_type_2 ppf ty1;
+      print_arg_label_and_out_type ppf lab ty1 ~print_type:(print_out_arg am);
       pp_print_string ppf " ->";
       pp_print_space ppf ();
-      print_out_type_1 ppf ty2;
+      print_out_ret ppf ty2;
       pp_close_box ppf ()
   | ty -> print_out_type_2 ppf ty
+
+and print_out_arg am ppf ty =
+  print_out_type_mode ~arg:true am ppf ty
+
+and print_out_ret ppf =
+  function
+  | Otyp_ret (rm, (Otyp_arrow _ as ty)) ->
+    begin match rm with
+    | Orm_no_parens ->
+      print_out_type_1 ppf ty
+    | Orm_any rm | Orm_parens rm ->
+      let m_legacy, m_new = partition_modes rm in
+      print_out_modes_legacy ppf m_legacy;
+      pp_print_char ppf '(';
+      print_out_type_1 ppf ty;
+      pp_print_char ppf ')';
+      print_out_modes_new ppf m_new
+    end
+  | Otyp_ret (Orm_any rm, ty) -> print_out_type_mode ~arg:false rm ppf ty
+  | _ -> assert false
+
 and print_out_type_2 ppf =
   function
-    Otyp_tuple tyl ->
-      fprintf ppf "@[<0>%a@]" (print_typlist print_simple_out_type " *") tyl
-  | ty -> print_simple_out_type ppf ty
-and print_simple_out_type ppf =
+  | Otyp_tuple tyl ->
+      fprintf
+        ppf "@[<0>%a@]" (print_labeled_typlist print_simple_out_type " *") tyl
+  | ty -> print_out_type_3 ppf ty
+and print_out_type_3 ppf =
   function
     Otyp_class (id, tyl) ->
       fprintf ppf "@[%a#%a@]" print_typargs tyl print_ident id
@@ -328,12 +517,22 @@ and print_simple_out_type ppf =
   | Otyp_alias _ | Otyp_poly _ | Otyp_arrow _ | Otyp_tuple _ as ty ->
       pp_open_box ppf 1;
       pp_print_char ppf '(';
-      print_out_type ppf ty;
+      print_out_type_0 ppf ty;
+      pp_print_char ppf ')';
+      pp_close_box ppf ()
+  | Otyp_unboxed_tuple tyl ->
+      pp_open_box ppf 1;
+      fprintf ppf "#(";
+      fprintf
+        ppf "@[<0>%a@]"
+        (print_labeled_typlist print_simple_out_type " *")
+        tyl;
       pp_print_char ppf ')';
       pp_close_box ppf ()
   | Otyp_abstract | Otyp_open
   | Otyp_sum _ | Otyp_manifest (_, _) -> ()
-  | Otyp_record lbls -> print_record_decl ppf lbls
+  | Otyp_record lbls -> print_record_decl ~unboxed:false ppf lbls
+  | Otyp_record_unboxed_product lbls -> print_record_decl ~unboxed:true ppf lbls
   | Otyp_module (p, fl) ->
       fprintf ppf "@[<1>(module %a" print_ident p;
       let first = ref true in
@@ -345,10 +544,23 @@ and print_simple_out_type ppf =
         fl;
       fprintf ppf ")@]"
   | Otyp_attribute (t, attr) ->
-      fprintf ppf "@[<1>(%a [@@%s])@]" print_out_type t attr.oattr_name
-and print_record_decl ppf lbls =
-  fprintf ppf "{%a@;<1 -2>}"
-    (print_list_init print_out_label (fun ppf -> fprintf ppf "@ ")) lbls
+      fprintf ppf "@[<1>(%a [@@%s])@]"
+        print_out_type_0 t attr.oattr_name
+  | Otyp_jkind_annot (t, jk) ->
+    fprintf ppf "@[<1>(%a@ :@ %a)@]"
+      print_out_type_0 t
+      print_out_jkind jk
+  | Otyp_of_kind jk ->
+    fprintf ppf "(type@ :@ %a)" print_out_jkind jk
+  | Otyp_ret _ -> assert false
+and print_out_type ppf typ =
+  print_out_type_0 ppf typ
+and print_simple_out_type ppf typ =
+  print_out_type_3 ppf typ
+and print_record_decl ~unboxed ppf lbls =
+  let hash = if unboxed then "#" else "" in
+  fprintf ppf "%s{%a@;<1 -2>}"
+    hash (print_list_init print_out_label (fun ppf -> fprintf ppf "@ ")) lbls
 and print_fields open_row ppf =
   function
     [] ->
@@ -368,15 +580,6 @@ and print_row_field ppf (l, opt_amp, tyl) =
   fprintf ppf "@[<hv 2>`%a%t%a@]" print_lident l pr_of
     (print_typlist print_out_type " &")
     tyl
-and print_typlist print_elem sep ppf =
-  function
-    [] -> ()
-  | [ty] -> print_elem ppf ty
-  | ty :: tyl ->
-      print_elem ppf ty;
-      pp_print_string ppf sep;
-      pp_print_space ppf ();
-      print_typlist print_elem sep ppf tyl
 and print_typargs ppf =
   function
     [] -> ()
@@ -388,15 +591,128 @@ and print_typargs ppf =
       pp_print_char ppf ')';
       pp_close_box ppf ();
       pp_print_space ppf ()
-and print_out_label ppf {olab_name; olab_mut; olab_type} =
-  fprintf ppf "@[<2>%s%a :@ %a@];"
-    (match olab_mut with
-     | Mutable -> "mutable "
-     | Immutable -> "")
-    print_lident olab_name
-    print_out_type olab_type
+and print_out_label ppf (name, mut, arg, gbl) =
+  (* See the notes [NON-LEGACY MODES] *)
+  let mut, atomic =
+    match mut with
+    | Om_immutable -> "", Nonatomic
+    | Om_mutable (None, atomic) -> "mutable ", atomic
+    | Om_mutable (Some s, atomic) -> "mutable(" ^ s ^ ") ", atomic
+  in
+  let print_atomic ppf atomic = match atomic with
+    | Nonatomic -> ()
+    | Atomic -> fprintf ppf " [@@atomic]"
+  in
+  let m_legacy, m_new = partition_modalities gbl in
+  fprintf ppf "@[<2>%s%a%a :@ %a%a%a@];"
+    mut
+    print_out_modalities_legacy m_legacy
+    print_lident name
+    print_out_type arg
+    print_out_modalities_new m_new
+    print_atomic atomic
+
+and print_out_jkind_const ppf ojkind =
+  let rec pp_element ~nested ppf (ojkind : Outcometree.out_jkind_const) =
+    (* HACK: we strip off the [Ojkind_const_with]s and convert them to a [string
+       list list] so we can sort them lexicographically, because otherwise the
+       order of printed [with]s is nondeterministic. This is sad, but we'd need
+       deterministic sorting of types to work around it.
+
+       CR aspsmith: remove this if we ever add deterministic, semantic type comparison
+    *)
+    let rec strip_withs ojkind =
+      match ojkind with
+      | Ojkind_const_with (base, ty, modalities) ->
+        let fix_indentation ppf =
+          let { out_newline; out_indent } as out_functions =
+            pp_get_formatter_out_functions ppf ()
+          in
+          let out_newline () =
+            out_newline ();
+            out_indent 18  (* this works well in practice: the string produced
+                              here gets included in a larger message, indented
+                              by 18 *)
+          in
+          pp_set_formatter_out_functions ppf { out_functions with out_newline }
+        in
+        let base, withs = strip_withs base in
+        let with_ =
+          Format.asprintf "%t%a" fix_indentation print_out_type ty
+          :: (match modalities with
+            | [] -> []
+            | modalities -> "@@" :: modalities)
+        in
+        base, with_ :: withs
+      | base -> base, []
+    in
+    let base, withs = strip_withs ojkind in
+    (match base with
+    | Ojkind_const_default -> fprintf ppf "_"
+    | Ojkind_const_abbreviation abbrev -> fprintf ppf "%s" abbrev
+    | Ojkind_const_mod (base, modes) ->
+      let pp_base ppf base =
+        match base with
+        | Some base -> fprintf ppf "%a@ " (pp_element ~nested:true) base
+        | None -> ()
+      in
+      Misc.pp_parens_if nested (fun ppf (base, modes) ->
+        fprintf ppf "%amod @[<hv>%a@]" pp_base base
+          (pp_print_list ~pp_sep:pp_print_space pp_print_string)
+          modes
+      ) ppf (base, modes)
+    | Ojkind_const_product ts ->
+      let pp_sep ppf () = Format.fprintf ppf "@ & " in
+      Misc.pp_nested_list ~nested ~pp_element ~pp_sep ppf ts
+    | Ojkind_const_with _ -> failwith "XXX unreachable (stripped off earlier)"
+    | Ojkind_const_kind_of _ ->
+      failwith "XXX unimplemented jkind syntax");
+    let withs = List.sort (List.compare String.compare) withs in
+    match withs with
+    | [] -> ()
+    | withs ->
+      pp_print_list
+        (fun ppf ->
+           Format.fprintf ppf "@ with @[<hv 2>%a@]"
+             (pp_print_list ~pp_sep:pp_print_space pp_print_string))
+        ppf
+        withs;
+  in
+  fprintf ppf "@[<hv 2>%a@]" (pp_element ~nested:false) ojkind
+
+and print_out_jkind ppf ojkind =
+  let rec pp_element ~nested ppf ojkind =
+    match ojkind with
+    | Ojkind_var v -> fprintf ppf "%s" v
+    | Ojkind_const jkind -> print_out_jkind_const ppf jkind
+    | Ojkind_product ts ->
+      let pp_sep ppf () = Format.fprintf ppf "@ & " in
+      Misc.pp_nested_list ~nested ~pp_element ~pp_sep ppf ts
+  in
+  pp_element ~nested:false ppf ojkind
+
+and print_out_jkind_annot ppf = function
+  | None -> ()
+  | Some lay -> fprintf ppf "@ : %a" print_out_jkind lay
+
+and pr_var_jkind ppf (v, l) = match l with
+    | None -> pr_var ppf v
+    | Some lay -> fprintf ppf "(%a : %a)"
+                    pr_var v
+                    print_out_jkind lay
+
+and pr_var_jkinds jks =
+  print_list pr_var_jkind (fun ppf -> fprintf ppf "@ ") jks
 
 let out_label = ref print_out_label
+
+let out_modality = ref print_out_modality
+
+let out_modes_new = ref print_out_modes_new
+
+let out_jkind_const = ref print_out_jkind_const
+
+let out_jkind = ref print_out_jkind
 
 let out_type = ref print_out_type
 
@@ -407,19 +723,29 @@ let out_type_args = ref print_typargs
 let print_type_parameter ?(non_gen=false) ppf s =
   if s = "_" then fprintf ppf "_" else ty_var ~non_gen ppf s
 
-let type_parameter ppf {ot_non_gen=non_gen; ot_name=ty; ot_variance=var,inj} =
+let type_parameter ~in_parens ppf
+    {ot_non_gen=non_gen; ot_name=ty; ot_variance=var,inj;
+     ot_jkind=lay; }
+  =
   let open Asttypes in
-  fprintf ppf "%s%s%a"
+  let format_string : _ format = "%s%s%a%a" in
+  let format_string : _ format = match lay with
+    | Some _ when not in_parens -> "(" ^^ format_string ^^ ")"
+    | _ -> format_string
+  in
+  fprintf ppf format_string
     (match var with Covariant -> "+" | Contravariant -> "-" | NoVariance ->  "")
     (match inj with Injective -> "!" | NoInjectivity -> "")
     (print_type_parameter ~non_gen) ty
+    print_out_jkind_annot lay
 
 let print_out_class_params ppf =
   function
     [] -> ()
   | tyl ->
       fprintf ppf "@[<1>[%a]@]@ "
-        (print_list type_parameter (fun ppf -> fprintf ppf ", "))
+        (print_list (type_parameter ~in_parens:true)
+           (fun ppf -> fprintf ppf ", "))
         tyl
 
 let rec print_out_class_type ppf =
@@ -433,8 +759,10 @@ let rec print_out_class_type ppf =
       in
       fprintf ppf "@[%a%a@]" pr_tyl tyl print_ident id
   | Octy_arrow (lab, ty, cty) ->
-      fprintf ppf "@[%a%a ->@ %a@]" print_arg_label lab
-        print_out_type_2 ty print_out_class_type cty
+      let print_type = print_out_type_2 in
+      fprintf ppf "@[%t ->@ %a@]"
+        (fun ppf -> print_arg_label_and_out_type ppf lab ty ~print_type)
+        print_out_class_type cty
   | Octy_signature (self_ty, csil) ->
       let pr_param ppf =
         function
@@ -567,6 +895,12 @@ and print_simple_out_module_type ppf =
   | Omty_functor _ as non_simple ->
      fprintf ppf "(%a)" print_out_module_type non_simple
   | Omty_hole -> fprintf ppf "_"
+  | Omty_strengthen (mty, id, unaliasable) ->
+     fprintf ppf "(%a with %a%s)"
+       print_simple_out_module_type mty
+       print_ident id
+       (if unaliasable then " [@unaliasable]" else "")
+
 and print_out_signature ppf =
   function
     [] -> ()
@@ -616,14 +950,16 @@ and print_out_sig_item ppf =
       fprintf ppf "@[<2>module type %s@]" name
   | Osig_modtype (name, mty) ->
       fprintf ppf "@[<2>module type %s =@ %a@]" name !out_module_type mty
-  | Osig_module (name, Omty_alias id, _) ->
-      fprintf ppf "@[<2>module %s =@ %a@]" name print_ident id
-  | Osig_module (name, mty, rs) ->
-      fprintf ppf "@[<2>%s %s :@ %a@]"
+  | Osig_module (name, Omty_alias id, moda, _) ->
+      fprintf ppf "@[<2>module %s =@ %a%a@]" name print_ident id
+        print_out_modalities_new moda
+  | Osig_module (name, mty, moda, rs) ->
+      fprintf ppf "@[<2>%s %s :@ %a%a@]"
         (match rs with Orec_not -> "module"
                      | Orec_first -> "module rec"
                      | Orec_next -> "and")
         name !out_module_type mty
+        print_out_modalities_new moda
   | Osig_type(td, rs) ->
         print_out_type_decl
           (match rs with
@@ -631,8 +967,9 @@ and print_out_sig_item ppf =
            | Orec_first -> "type"
            | Orec_next  -> "and")
           ppf td
-  | Osig_value vd ->
-      let kwd = if vd.oval_prims = [] then "val" else "external" in
+  | Osig_value { oval_name; oval_type; oval_modalities;
+                 oval_prims; oval_attributes } ->
+      let kwd = if oval_prims = [] then "val" else "external" in
       let pr_prims ppf =
         function
           [] -> ()
@@ -640,10 +977,12 @@ and print_out_sig_item ppf =
             fprintf ppf "@ = \"%s\"" s;
             List.iter (fun s -> fprintf ppf "@ \"%s\"" s) sl
       in
-      fprintf ppf "@[<2>%s %a :@ %a%a%a@]" kwd value_ident vd.oval_name
-        !out_type vd.oval_type pr_prims vd.oval_prims
+      fprintf ppf "@[<2>%s %a :@ %a%a%a%a@]" kwd value_ident oval_name
+        !out_type oval_type
+        print_out_modalities_new oval_modalities
+        pr_prims oval_prims
         (fun ppf -> List.iter (fun a -> fprintf ppf "@ [@@@@%s]" a.oattr_name))
-        vd.oval_attributes
+        oval_attributes
   | Osig_ellipsis ->
       fprintf ppf "..."
 
@@ -658,12 +997,13 @@ and print_out_type_decl kwd ppf td =
   let type_defined ppf =
     match td.otype_params with
       [] -> print_lident ppf td.otype_name
-    | [param] ->
-        fprintf ppf "@[%a@ %a@]" type_parameter param
-          print_lident td.otype_name
+    | [param] -> fprintf ppf "@[%a@ %a@]"
+                   (type_parameter ~in_parens:false) param
+                   print_lident td.otype_name
     | _ ->
         fprintf ppf "@[(@[%a)@]@ %a@]"
-          (print_list type_parameter (fun ppf -> fprintf ppf ",@ "))
+          (print_list (type_parameter ~in_parens:true)
+             (fun ppf -> fprintf ppf ",@ "))
           td.otype_params
           print_lident td.otype_name
   in
@@ -673,7 +1013,9 @@ and print_out_type_decl kwd ppf td =
     | _ -> ()
   in
   let print_name_params ppf =
-    fprintf ppf "%s %t%a" kwd type_defined print_manifest td.otype_type
+    fprintf ppf "%s %t%a%a" kwd type_defined
+      print_out_jkind_annot td.otype_jkind
+      print_manifest td.otype_type
   in
   let ty =
     match td.otype_type with
@@ -684,28 +1026,31 @@ and print_out_type_decl kwd ppf td =
     Asttypes.Private -> fprintf ppf " private"
   | Asttypes.Public -> ()
   in
-  let print_immediate ppf =
-    match td.otype_immediate with
-    | Unknown -> ()
-    | Always -> fprintf ppf " [%@%@immediate]"
-    | Always_on_64bits -> fprintf ppf " [%@%@immediate64]"
-  in
   let print_unboxed ppf =
     if td.otype_unboxed then fprintf ppf " [%@%@unboxed]" else ()
+  in
+  let print_or_null_reexport ppf =
+    if td.otype_or_null_reexport then
+      fprintf ppf " [%@%@or_null_reexport]"
+    else ()
   in
   let print_out_tkind ppf = function
   | Otyp_abstract -> ()
   | Otyp_record lbls ->
       fprintf ppf " =%a %a"
         print_private td.otype_private
-        print_record_decl lbls
+        (print_record_decl ~unboxed:false) lbls
+  | Otyp_record_unboxed_product lbls ->
+      fprintf ppf " =%a %a"
+        print_private td.otype_private
+        (print_record_decl ~unboxed:true) lbls
   | Otyp_sum constrs ->
-      let variants fmt constrs =
+    let variants fmt constrs =
         if constrs = [] then fprintf fmt "|" else
         fprintf fmt "%a" (print_list print_out_constr
           (fun ppf -> fprintf ppf "@ | ")) constrs in
-      fprintf ppf " =%a@;<1 2>%a"
-        print_private td.otype_private variants constrs
+    fprintf ppf " =%a@;<1 2>%a"
+      print_private td.otype_private variants constrs
   | Otyp_open ->
       fprintf ppf " =%a .."
         print_private td.otype_private
@@ -714,12 +1059,25 @@ and print_out_type_decl kwd ppf td =
         print_private td.otype_private
         !out_type ty
   in
-  fprintf ppf "@[<2>@[<hv 2>%t%a@]%t%t%t@]"
+  let print_out_attrs ppf =
+    List.iter (fun a -> fprintf ppf "@ [@@@@%s]" a.oattr_name)
+  in
+  fprintf ppf "@[<2>@[<hv 2>%t%a@]%t%t%t@]%a"
     print_name_params
     print_out_tkind ty
     print_constraints
-    print_immediate
     print_unboxed
+    print_or_null_reexport
+    print_out_attrs td.otype_attributes
+
+and print_simple_out_gf_type ppf (ty, gf) =
+  let m_legacy, m_new = partition_modalities gf in
+  print_out_modalities_legacy ppf m_legacy;
+  print_simple_out_type ppf ty;
+  print_out_modalities_new ppf m_new
+
+and print_out_constr_args ppf tyl =
+  print_typlist print_simple_out_gf_type " *" ppf tyl
 
 and print_out_constr ppf constr =
   let {
@@ -739,16 +1097,20 @@ and print_out_constr ppf constr =
           pp_print_string ppf name
       | _ ->
           fprintf ppf "@[<2>%s of@ %a@]" name
-            (print_typlist print_simple_out_type " *") tyl
+            print_out_constr_args tyl
       end
-  | Some ret_type ->
+  | Some (vars_jkinds, ret_type) ->
+      fprintf ppf "@[<2>%s :@ " name;
+      begin match vars_jkinds with
+      | [] -> ()
+      | _ -> fprintf ppf "@[<hov>%a.@]@ " pr_var_jkinds vars_jkinds
+      end;
       begin match tyl with
       | [] ->
-          fprintf ppf "@[<2>%s :@ %a@]" name print_simple_out_type  ret_type
+          fprintf ppf "%a@]" print_simple_out_type ret_type
       | _ ->
-          fprintf ppf "@[<2>%s :@ %a -> %a@]" name
-            (print_typlist print_simple_out_type " *")
-            tyl print_simple_out_type ret_type
+          fprintf ppf "%a -> %a@]"
+            print_out_constr_args tyl print_simple_out_type ret_type
       end
 
 and print_out_extension_constructor ppf ext =
@@ -790,9 +1152,10 @@ and print_out_type_extension ppf te =
     print_extended_type
     (if te.otyext_private = Asttypes.Private then " private" else "")
     (print_list print_out_constr (fun ppf -> fprintf ppf "@ | "))
-    te.otyext_constructors
+     te.otyext_constructors
 
 let out_constr = ref print_out_constr
+let out_constr_args = ref print_out_constr_args
 let _ = out_module_type := print_out_module_type
 let _ = out_signature := print_out_signature
 let _ = out_sig_item := print_out_sig_item

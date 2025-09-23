@@ -23,9 +23,14 @@ type t =
   | Local of { name: string; stamp: int }
   | Scoped of { name: string; stamp: int; scope: int }
   | Global of string
+      (* separate from [Global_with_args] for efficiency *)
   | Predef of { name: string; stamp: int }
       (* the stamp is here only for fast comparison, but the name of
          predefined identifiers is always unique. *)
+  | Global_with_args of global
+      (* must have non-empty [args] *)
+and global = Global_module.Name.t = private
+  { head: string; args: Global_module.Name.argument list }
 
 (* A stamp of 0 denotes a persistent identifier *)
 
@@ -47,11 +52,25 @@ let create_predef s =
 let create_persistent s =
   Global s
 
+let create_global glob =
+  match glob with
+  | { head; args = [] } -> Global head
+  | _ -> Global_with_args glob
+
+let create_local_binding_for_global glob =
+  create_local (Global_module.Name.to_string glob)
+
+let create_instance head args =
+  create_global (Global_module.Name.create_exn head args)
+
+let global_name g = Global_module.Name.to_string g
+
 let name = function
   | Local { name; _ }
   | Scoped { name; _ }
   | Global name
   | Predef { name; _ } -> name
+  | Global_with_args g -> global_name g
 
 let rename = function
   | Local { name; stamp = _ }
@@ -73,16 +92,14 @@ let unique_name = function
       (* we know that none of the predef names (currently) finishes in
          "_<some number>", and that their name is unique. *)
       name
+  | Global_with_args g -> global_name g
 
 let unique_toplevel_name = function
   | Local { name; stamp }
   | Scoped { name; stamp } -> name ^ "/" ^ Int.to_string stamp
   | Global name
   | Predef { name; _ } -> name
-
-let persistent = function
-  | Global _ -> true
-  | _ -> false
+  | Global_with_args g -> global_name g
 
 let equal i1 i2 =
   match i1, i2 with
@@ -93,6 +110,7 @@ let equal i1 i2 =
   | Predef { stamp = s1; _ }, Predef { stamp = s2 } ->
       (* if they don't have the same stamp, they don't have the same name *)
       s1 = s2
+  | Global_with_args g1, Global_with_args g2 -> Global_module.Name.equal g1 g2
   | _ ->
       false
 
@@ -104,6 +122,7 @@ let same i1 i2 =
       s1 = s2
   | Global name1, Global name2 ->
       name1 = name2
+  | Global_with_args g1, Global_with_args g2 -> Global_module.Name.equal g1 g2
   | _ ->
       false
 
@@ -118,7 +137,7 @@ let compare_stamp id1 id2 =
 let scope = function
   | Scoped { scope; _ } -> scope
   | Local _ -> highest_scope
-  | Global _ | Predef _ -> lowest_scope
+  | Global _ | Predef _ | Global_with_args _ -> lowest_scope
 
 let reinit_level = ref (-1)
 
@@ -127,15 +146,30 @@ let reinit () =
   then reinit_level := !currentstamp
   else currentstamp := !reinit_level
 
-let global = function
+let is_global = function
+  | Global _ -> true
+  | Global_with_args _ -> true
+  | _ -> false
+
+let is_global_or_predef = function
   | Local _
   | Scoped _ -> false
   | Global _
-  | Predef _ -> true
+  | Predef _
+  | Global_with_args _ -> true
 
 let is_predef = function
   | Predef _ -> true
   | _ -> false
+
+let is_instance = function
+  | Global_with_args _ -> true
+  | _ -> false
+
+let to_global = function
+  | Global head -> Some (Global_module.Name.create_no_args head)
+  | Global_with_args g -> Some g
+  | _ -> None
 
 let print ~with_scope ppf =
   let open Format_doc in
@@ -147,12 +181,19 @@ let print ~with_scope ppf =
       fprintf ppf "%s/%i" name n
   | Scoped { name; stamp = n; scope } ->
       fprintf ppf "%s/%i%s" name n
-        (if with_scope then asprintf "[%i]" scope else "")
+        (if with_scope then sprintf "[%i]" scope else "")
+  | Global_with_args g ->
+      fprintf ppf "%a!" Global_module.Name.print g
 
 let print_with_scope ppf id = print ~with_scope:true ppf id
 
-let doc_print ppf id = print ~with_scope:false ppf id
-let print ppf id = Format_doc.compat doc_print ppf id
+let print ppf id = print ~with_scope:false ppf id
+
+let to_global_exn id =
+  match to_global id with
+  | Some global -> global
+  | None -> Misc.fatal_errorf "Not global: %a" print id
+
 (* For the documentation of ['a Ident.tbl], see ident.mli.
 
    The implementation is a copy-paste specialization of
@@ -372,6 +413,9 @@ let compare x y =
   | Global x, Global y -> compare x y
   | Global _, _ -> 1
   | _, Global _ -> (-1)
+  | Global_with_args g1, Global_with_args g2 -> Global_module.Name.compare g1 g2
+  | Global_with_args _, _ -> 1
+  | _, Global_with_args _ -> (-1)
   | Predef { stamp = s1; _ }, Predef { stamp = s2; _ } -> compare s1 s2
 
 let output oc id = output_string oc (unique_name id)

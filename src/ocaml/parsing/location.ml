@@ -18,6 +18,47 @@ open Lexing
 type t = Warnings.loc =
   { loc_start: position; loc_end: position; loc_ghost: bool }
 
+let compare_position : position -> position -> int =
+  fun
+    { pos_fname = pos_fname_1
+    ; pos_lnum = pos_lnum_1
+    ; pos_bol = pos_bol_1
+    ; pos_cnum = pos_cnum_1
+    }
+    { pos_fname = pos_fname_2
+    ; pos_lnum = pos_lnum_2
+    ; pos_bol = pos_bol_2
+    ; pos_cnum = pos_cnum_2
+    }
+  ->
+    match String.compare pos_fname_1 pos_fname_2 with
+    | 0 -> begin match Int.compare pos_lnum_1 pos_lnum_2 with
+      | 0 -> begin match Int.compare pos_bol_1 pos_bol_2 with
+        | 0 -> Int.compare pos_cnum_1 pos_cnum_2
+        | i -> i
+      end
+      | i -> i
+    end
+    | i -> i
+;;
+
+let compare
+      { loc_start = loc_start_1
+      ; loc_end = loc_end_1
+      ; loc_ghost = loc_ghost_1 }
+      { loc_start = loc_start_2
+      ; loc_end = loc_end_2
+      ; loc_ghost = loc_ghost_2 }
+  =
+  match compare_position loc_start_1 loc_start_2 with
+  | 0 -> begin match compare_position loc_end_1 loc_end_2 with
+    | 0 -> Bool.compare loc_ghost_1 loc_ghost_2
+    | i -> i
+  end
+  | i -> i
+;;
+
+
 let in_file = Warnings.ghost_loc_in_file
 
 let none = in_file "_none_"
@@ -37,6 +78,11 @@ let init lexbuf fname =
     pos_cnum = 0;
   }
 
+
+let ghostify l =
+  if l.loc_ghost
+  then l
+  else { l with loc_ghost = true }
 
 let symbol_rloc () = {
   loc_start = Parsing.symbol_start_pos ();
@@ -67,6 +113,27 @@ let get_pos_info pos =
   (pos.pos_fname, pos.pos_lnum, pos.pos_cnum - pos.pos_bol)
 
 
+let merge ?(ghost = true) locs =
+  let hd, tl =
+    match locs with
+    | hd :: tl -> hd, tl
+    | [] -> failwith "Compiler bug: Called [Location.merge] with an empty list"
+  in
+  List.fold_left
+    (fun acc x ->
+      let loc_start =
+        if compare_position x.loc_start acc.loc_start < 0
+        then x.loc_start else acc.loc_start
+      in
+      let loc_end =
+        if compare_position x.loc_end acc.loc_end > 0
+        then x.loc_end else acc.loc_end
+      in
+      let loc_ghost = x.loc_ghost || acc.loc_ghost in
+      { loc_start; loc_end; loc_ghost })
+    { hd with loc_ghost = hd.loc_ghost || ghost }
+    tl
+
 type 'a loc = {
   txt : 'a;
   loc : t;
@@ -74,6 +141,10 @@ type 'a loc = {
 
 let mkloc txt loc = { txt ; loc }
 let mknoloc txt = mkloc txt none
+let get_txt { txt } = txt
+let get_loc { loc } = loc
+let map f { txt; loc} = {txt = f txt; loc}
+let compare_txt f { txt=t1 } { txt=t2 } = f t1 t2
 
 (******************************************************************************)
 (* Input info *)
@@ -227,17 +298,18 @@ module Doc = struct
    Some of the information (filename, line number or characters numbers) in the
    location might be invalid; in which case we do not print it.
  *)
-  let loc ppf loc =
-    let file_valid = function
-      | "_none_" ->
-          (* This is a dummy placeholder, but we print it anyway to please
-             editors that parse locations in error messages (e.g. Emacs). *)
-          true
-      | "" | "//toplevel//" -> false
-      | _ -> true
-    in
-    let line_valid line = line > 0 in
-    let chars_valid ~startchar ~endchar = startchar <> -1 && endchar <> -1 in
+let print_loc ~capitalize_first ppf loc =
+  (* setup_tags (); *)
+  let file_valid = function
+    | "_none_" ->
+        (* This is a dummy placeholder, but we print it anyway to please editors
+           that parse locations in error messages (e.g. Emacs). *)
+        true
+    | "" | "//toplevel//" -> false
+    | _ -> true
+  in
+  let line_valid line = line > 0 in
+  let chars_valid ~startchar ~endchar = startchar <> -1 && endchar <> -1 in
 
     let file =
       (* According to the comment in location.mli, if [pos_fname] is "", we must
@@ -250,12 +322,13 @@ module Doc = struct
     let startchar = loc.loc_start.pos_cnum - loc.loc_start.pos_bol in
     let endchar = loc.loc_end.pos_cnum - loc.loc_end.pos_bol in
 
-    let first = ref true in
-    let capitalize s =
-      if !first then (first := false; String.capitalize_ascii s)
-      else s in
-    let comma () =
-      if !first then () else Fmt.fprintf ppf ", " in
+  let first = ref true in
+  let capitalize s =
+    if !first then (first := false;
+                    if capitalize_first then String.capitalize_ascii s else s)
+    else s in
+  let comma () =
+    if !first then () else Format.fprintf ppf ", " in
 
     Fmt.fprintf ppf "@{<loc>";
 
@@ -294,6 +367,13 @@ let print_loc = Fmt.compat Doc.loc
 let print_locs = Fmt.compat Doc.locs
 let separate_new_message ppf = Fmt.compat Doc.separate_new_message ppf ()
 
+let print_loc_in_lowercase = print_loc ~capitalize_first:false
+let print_loc = print_loc ~capitalize_first:true
+
+(* Print a comma-separated list of locations *)
+let print_locs ppf locs =
+  Format.pp_print_list ~pp_sep:(fun ppf () -> Format.fprintf ppf ",@ ")
+    print_loc ppf locs
 
 (******************************************************************************)
 (* An interval set structure; additionally, it stores user-provided information
@@ -328,6 +408,11 @@ struct
 
   (* non overlapping intervals *)
   type 'a t = ('a bound * 'a bound) list
+
+  let compare (fst1, snd1) (fst2, snd2) =
+    match Int.compare fst1 fst2 with
+    | 0 -> Int.compare snd1 snd2
+    | i -> i
 
   let of_intervals intervals =
     let pos =
@@ -572,6 +657,24 @@ let lines_around
 *)
 
 (*
+(* Get lines from a file *)
+let lines_around_from_file
+    ~(start_pos: position) ~(end_pos: position)
+    (filename: string):
+  input_line list
+  =
+  try
+    let cin = open_in_bin filename in
+    let read_char () =
+      try Some (input_char cin) with End_of_file -> None
+    in
+    let lines =
+      lines_around ~start_pos ~end_pos ~seek:(seek_in cin) ~read_char
+    in
+    close_in cin;
+    lines
+  with Sys_error _ -> []
+
 (* Attempt to get lines from the lexing buffer. *)
 let lines_around_from_lexbuf
     ~(start_pos: position) ~(end_pos: position)
@@ -625,8 +728,18 @@ let lines_around_from_current_input ~start_pos ~end_pos =
       lines_around_from_phrasebuf pb ~start_pos ~end_pos
   | Some lb, _, _ ->
       lines_around_from_lexbuf lb ~start_pos ~end_pos
-  | None, _, _ ->
-      []
+  | None, _, filename ->
+      (* A situation where we have no input buffer and no phrase buffer
+         is when the compiler is getting the binary AST directly as input. *)
+      (* Be a bit defensive, and do not try to open one of the possible
+         [!input_name] values that we know do not denote valid filenames. *)
+      let file_valid = match filename with
+        | "//toplevel//" | "_none_" | "" -> false
+        | _ -> true
+      in
+      if file_valid
+      then lines_around_from_file filename ~start_pos ~end_pos
+      else []
 *)
 
 (******************************************************************************)
@@ -1020,5 +1133,9 @@ let () =
       | _ -> None
     )
 
-let raise_errorf ?(loc = none) ?(sub = []) ?(footnote=Fun.const None) ?(source = Typer) =
-  Fmt.kdoc_printf (fun txt -> raise (Error (mkerror loc sub footnote source txt)))
+let raise_errorf ?(loc = none) ?(sub = []) ?(source = Typer)=
+  Format.kdprintf (fun txt -> raise (Error (mkerror loc sub txt source)))
+
+let todo_overwrite_not_implemented ?(kind = "") t =
+  alert ~kind t "Overwrite not implemented.";
+  assert false

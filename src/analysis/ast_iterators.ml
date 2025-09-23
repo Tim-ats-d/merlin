@@ -131,7 +131,7 @@ let iter_on_defs ~uid_to_locs_tbl =
       (fun sub ({ exp_extra; _ } as expr) ->
         List.iter exp_extra ~f:(fun (exp_extra, _loc, _attr) ->
             match exp_extra with
-            | Texp_newtype' (typ_id, typ_name, uid) ->
+            | Texp_newtype (typ_id, typ_name, _, uid) ->
               log "Found newtype %s wit id %a (%a)\n%!" typ_name.txt Logger.fmt
                 (Fun.flip (Format_doc.compat Ident.print_with_scope) typ_id)
                 Logger.fmt
@@ -163,6 +163,8 @@ let iter_on_usages ~f (local_defs : Mtyper.typedtree) =
     | `Implementation structure -> iter.structure iter structure
   end
 
-let iterator_on_usages ~f =
+let iterator_on_usages ~include_hidden ~f =
   let occ_iter = Cmt_format.iter_on_occurrences ~f in
-  iter_only_visible occ_iter
+  match include_hidden with
+  | false -> iter_only_visible occ_iter
+  | true -> occ_iter

@@ -32,11 +32,6 @@ type error =
   | Capitalized_label of string
   | Invalid_literal of string
   | Invalid_directive of string * string option
-  | Invalid_encoding of string
-  | Invalid_char_in_ident of Uchar.t
-  | Non_lowercase_delimiter of string
-  | Capitalized_raw_identifier of string
-  | Unknown_keyword of string
 
 exception Error of error * Location.t
 
@@ -89,72 +84,75 @@ let rec catch m f = match m with
 
 (* The table of keywords *)
 
-let all_keywords =
-  let v5_3 = Some (5,3) in
-  let v1_0 = Some (1,0) in
-  let v1_6 = Some (1,6) in
-  let v4_2 = Some (4,2) in
-  let always = None in
-  [
-    "and", AND, always;
-    "as", AS, always;
-    "assert", ASSERT, v1_6;
-    "begin", BEGIN, always;
-    "class", CLASS, v1_0;
-    "constraint", CONSTRAINT, v1_0;
-    "do", DO, always;
-    "done", DONE, always;
-    "downto", DOWNTO, always;
-    "effect", EFFECT, v5_3;
-    "else", ELSE, always;
-    "end", END, always;
-    "exception", EXCEPTION, always;
-    "external", EXTERNAL, always;
-    "false", FALSE, always;
-    "for", FOR, always;
-    "fun", FUN, always;
-    "function", FUNCTION, always;
-    "functor", FUNCTOR, always;
-    "if", IF, always;
-    "in", IN, always;
-    "include", INCLUDE, always;
-    "inherit", INHERIT, v1_0;
-    "initializer", INITIALIZER, v1_0;
-    "lazy", LAZY, v1_6;
-    "let", LET, always;
-    "match", MATCH, always;
-    "method", METHOD, v1_0;
-    "module", MODULE, always;
-    "mutable", MUTABLE, always;
-    "new", NEW, v1_0;
-    "nonrec", NONREC, v4_2;
-    "object", OBJECT, v1_0;
-    "of", OF, always;
-    "open", OPEN, always;
-    "or", OR, always;
+let keyword_table : keywords =
+  create_hashtable 149 [
+    "and", AND;
+    "as", AS;
+    "assert", ASSERT;
+    "begin", BEGIN;
+    "class", CLASS;
+    "constraint", CONSTRAINT;
+    "do", DO;
+    "done", DONE;
+    "downto", DOWNTO;
+    "else", ELSE;
+    "end", END;
+    "exception", EXCEPTION;
+    "exclave_", EXCLAVE;
+    "external", EXTERNAL;
+    "false", FALSE;
+    "for", FOR;
+    "fun", FUN;
+    "function", FUNCTION;
+    "functor", FUNCTOR;
+    "global_", GLOBAL;
+    "if", IF;
+    "in", IN;
+    "include", INCLUDE;
+    "inherit", INHERIT;
+    "initializer", INITIALIZER;
+    "kind_abbrev_", KIND_ABBREV;
+    "kind_of_", KIND_OF;
+    "lazy", LAZY;
+    "let", LET;
+    "local_", LOCAL;
+    "match", MATCH;
+    "method", METHOD;
+    "mod", MOD;
+    "module", MODULE;
+    "mutable", MUTABLE;
+    "new", NEW;
+    "nonrec", NONREC;
+    "object", OBJECT;
+    "of", OF;
+    "once_", ONCE;
+    "open", OPEN;
+    "or", OR;
+    "overwrite_", OVERWRITE;
 (*  "parser", PARSER; *)
-    "private", PRIVATE, v1_0;
-    "rec", REC, always;
-    "sig", SIG, always;
-    "struct", STRUCT, always;
-    "then", THEN, always;
-    "to", TO, always;
-    "true", TRUE, always;
-    "try", TRY, always;
-    "type", TYPE, always;
-    "val", VAL, always;
-    "virtual", VIRTUAL, v1_0;
-    "when", WHEN, always;
-    "while", WHILE, always;
-    "with", WITH, always;
+    "private", PRIVATE;
+    "rec", REC;
+    "sig", SIG;
+    "stack_", STACK;
+    "struct", STRUCT;
+    "then", THEN;
+    "to", TO;
+    "true", TRUE;
+    "try", TRY;
+    "type", TYPE;
+    "unique_", UNIQUE;
+    "val", VAL;
+    "virtual", VIRTUAL;
+    "when", WHEN;
+    "while", WHILE;
+    "with", WITH;
 
-    "lor", INFIXOP3("lor"), always; (* Should be INFIXOP2 *)
-    "lxor", INFIXOP3("lxor"), always; (* Should be INFIXOP2 *)
-    "mod", INFIXOP3("mod"), always;
-    "land", INFIXOP3("land"), always;
-    "lsl", INFIXOP4("lsl"), always;
-    "lsr", INFIXOP4("lsr"), always;
-    "asr", INFIXOP4("asr"), always
+    "lor", INFIXOP3("lor"); (* Should be INFIXOP2 *)
+    "lxor", INFIXOP3("lxor"); (* Should be INFIXOP2 *)
+    "land", INFIXOP3("land");
+    "lsl", INFIXOP4("lsl");
+    "lsr", INFIXOP4("lsr");
+    "asr", INFIXOP4("asr");
 ]
 
 let keyword_table = Hashtbl.create 149
@@ -181,6 +179,14 @@ let populate_keywords (version,keywords) =
 let () = populate_keywords (None,[])
 
 let keywords l = create_hashtable 11 l
+
+let lookup_keyword name =
+  match Hashtbl.find keyword_table name with
+  | kw -> kw
+  | exception Not_found ->
+     LIDENT name
+
+(* To buffer string literals *)
 
 let list_keywords =
   let add_kw str _tok kws = str :: kws in
@@ -224,6 +230,118 @@ let store_normalized_newline buf newline =
 let in_comment state = state.comment_start_loc <> []
 let print_warnings = ref true
 
+let at_beginning_of_line pos = (pos.pos_cnum = pos.pos_bol)
+
+(* Syntax mode configuration for the #syntax directive *)
+module Syntax_mode = struct
+  let quotations = ref Config.syntax_quotations
+end
+
+let _reset_syntax_mode () =
+  Syntax_mode.quotations := Config.syntax_quotations
+
+(* See the comment on the [directive] lexer. *)
+type directive_lexing_already_consumed =
+   | Hash
+   | Hash_and_line_num of { line_num : string }
+
+type deferred_token =
+  { token : token
+  ; start_pos : Lexing.position
+  ; end_pos : Lexing.position
+  }
+
+(* This queue will only ever have 0 or 1 elements in it. We use it
+   instead of an [option ref] for its convenient interface.
+*)
+let deferred_tokens : deferred_token Queue.t = Queue.create ()
+
+(* Effectively splits the text in the lexer's current "window" (defined below)
+   into two halves. The current call to the lexer will return the first half of
+   the text in the window, and the next call to the lexer will return the second
+   half (of length [len]) of the text in the window.
+
+   "window" refers to the text matched by a production of the lexer. It spans
+   from [lexer.lex_start_p] to [lexer.lex_curr_p].
+
+   The function accomplishes this splitting by doing two things:
+    - It sets the current window of the lexbuf to only account for the
+      first half of the text. (The first half is of length: |text|-len.)
+    - It enqueues a token into [deferred_tokens] such that, the next time the
+      lexer is called, it will return the specified [token] *and* set the window
+      of the lexbuf to account for the second half of the text. (The second half
+      is of length: |text|.)
+
+   This business with setting the window of the lexbuf is only so that error
+   messages point at the right place in the program text.
+*)
+let enqueue_token_from_end_of_lexbuf_window (lexbuf : Lexing.lexbuf) token ~len =
+  let suffix_end = lexbuf.lex_curr_p in
+  let suffix_start =
+    { suffix_end with pos_cnum = suffix_end.pos_cnum - len }
+  in
+  lexbuf.lex_curr_p <- suffix_start;
+  Queue.add
+    { token; start_pos = suffix_start; end_pos = suffix_end }
+    deferred_tokens
+
+(* Note [Lexing hack for float#]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   This note describes a non-backward-compatible Jane Street--internal change to
+   the lexer.
+
+   We want the lexer to lex [float#] differently than [float #]. [float#] is the
+   new syntax for the unboxed float type. It veers close to the syntax for the
+   type of all objects belonging to a class [c], which is [#c]. The way we
+   navigate this veering is by producing the following tokens for these source
+   program examples, where LIDENT(s) is an LIDENT with text [s].
+
+   float#c   ==> LIDENT(float) HASH_SUFFIX LIDENT(c)
+   float# c  ==> LIDENT(float) HASH_SUFFIX LIDENT(c)
+   float # c ==> LIDENT(float) HASH LIDENT(c)
+   float #c  ==> LIDENT(float) HASH LIDENT(c)
+
+   (A) The parser interprets [LIDENT(float) HASH_SUFFIX LIDENT(c)] as
+       "the type constructor [c] applied to the unboxed float type."
+   (B) The parser interprets [LIDENT(float) HASH LIDENT(c)] as
+       "the type constructor [#c] applied to the usual boxed float type."
+
+   This is not a backward-compatible change. In upstream ocaml, the lexer
+   produces [LIDENT(float) HASH LIDENT(c)] for all the above source programs.
+
+   But, this isn't problematic: everybody puts a space before '#c' to mean (B).
+   No existing code writes things like [float#c] or indeed [float# c].
+
+   We accomplish this hack by setting some global mutable state upon seeing
+   an identifier immediately followed by a hash. When that state is set, we
+   will produce [HASH_SUFFIX] the next time the lexer is called. This is
+   done in [enqueue_hash_suffix_from_end_of_lexbuf_window].
+
+   Note [Lexing hack for hash operators]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   To complicate the above story, we don't want to treat the # in the
+   below program as HASH_SUFFIX:
+
+   x#~#y
+
+   We instead want:
+
+   x#~#y ==> LIDENT(x) HASHOP(#~#) LIDENT(y)
+
+   This is to allow for infix hash operators. We add an additional hack, in
+   the style of Note [Lexing hack for float#], where the lexer consumes [x#~#]
+   all at once, but produces LIDENT(x) from the current call to the lexer and
+   HASHOP(#~#) from the next call to the lexer. This is done in
+   [enqueue_hashop_from_end_of_lexbuf_window].
+ *)
+
+let enqueue_hash_suffix_from_end_of_lexbuf_window lexbuf =
+  enqueue_token_from_end_of_lexbuf_window lexbuf HASH_SUFFIX ~len:1
+
+let enqueue_hashop_from_end_of_lexbuf_window lexbuf ~hashop =
+  enqueue_token_from_end_of_lexbuf_window lexbuf (HASHOP hashop)
+    ~len:(String.length hashop)
+
 (* Escaped chars are interpreted in strings unless they are in comments. *)
 let store_escaped_char state lexbuf c =
   if in_comment state
@@ -260,15 +378,24 @@ let wrap_string_lexer f state lexbuf =
   state.string_start_loc <- Location.none;
   return (Buffer.contents state.buffer, loc)
 
-let wrap_comment_lexer state comment lexbuf =
-  let start_loc = Location.curr lexbuf  in
-  state.comment_start_loc <- [start_loc];
-  Buffer.reset state.buffer;
-  let+ end_loc = comment state lexbuf in
-  let s = Buffer.contents state.buffer in
-  Buffer.reset state.buffer;
-  s,
-  { start_loc with Location.loc_end = end_loc.Location.loc_end }
+let directive_error
+    (lexbuf : Lexing.lexbuf) explanation ~directive ~already_consumed
+  =
+  let directive_prefix =
+    match already_consumed with
+    | Hash -> "#"
+    | Hash_and_line_num { line_num } -> "#" ^ line_num
+  in
+  (* Set the lexbuf's current window to extend to the start of
+     the directive so the error message's location is more accurate.
+  *)
+  lexbuf.lex_start_p <-
+    { lexbuf.lex_start_p with
+      pos_cnum =
+        lexbuf.lex_start_p.pos_cnum - String.length directive_prefix
+    };
+  raise (Error (Invalid_directive (directive_prefix ^ directive, Some explanation),
+                Location.curr lexbuf))
 
 (* to translate escape sequences *)
 
@@ -385,6 +512,10 @@ let keyword_or state s default =
 let is_keyword name =
   Hashtbl.mem keyword_table name
 
+let is_keyword name =
+  match lookup_keyword name with
+  | LIDENT _ -> false
+  | _ -> true
 let () = Lexer.is_keyword_ref := is_keyword
 
 let find_keyword lexbuf name default =
@@ -420,8 +551,41 @@ let update_loc lexbuf _file line absolute chars =
   }
 
 
-(* TODO Merlin should we support this ?*)
-let handle_docstrings = ref false
+let warn_latin1 lexbuf =
+  Location.deprecated (Location.curr lexbuf)
+    "ISO-Latin1 characters in identifiers"
+;;
+
+let float ~maybe_hash lit modifier =
+  match maybe_hash with
+  | "#" -> return (HASH_FLOAT (lit, modifier))
+  | "" -> return (FLOAT (lit, modifier))
+  | unexpected -> fatal_error ("expected # or empty string: " ^ unexpected)
+
+let int ~maybe_hash lit modifier =
+  match maybe_hash with
+  | "#" -> return (HASH_INT (lit, modifier))
+  | "" -> return (INT (lit, modifier))
+  | unexpected -> fatal_error ("expected # or empty string: " ^ unexpected)
+;;
+
+let produce_and_backtrack lexbuf token back =
+  lexbuf.lex_curr_pos <- lexbuf.lex_curr_pos - back;
+  let curpos = lexbuf.lex_curr_p in
+  lexbuf.lex_curr_p <- { curpos with pos_cnum = curpos.pos_cnum - back };
+  return token
+
+let char ~maybe_hash lit =
+  match maybe_hash with
+  | "#" -> HASH_CHAR (lit)
+  | "" -> CHAR (lit)
+  | unexpected -> fatal_error ("expected # or empty string: " ^ unexpected)
+
+let skip_hash ~maybe_hash =
+  match maybe_hash with
+  | "#" -> 1
+  | "" -> 0
+  | unexpected -> fatal_error ("expected # or empty string: " ^ unexpected)
 
 (* Error report *)
 
@@ -470,26 +634,6 @@ let prepare_error loc = function
         (fun ppf -> match explanation with
            | None -> ()
            | Some expl -> fprintf ppf ": %s" expl)
-  | Invalid_encoding s ->
-    Location.errorf ~loc "Invalid encoding of identifier %s." s
-  | Invalid_char_in_ident u ->
-      Location.errorf ~loc "Invalid character U+%X in identifier"
-         (Uchar.to_int u)
-  | Capitalized_raw_identifier lbl ->
-      Location.errorf ~loc
-        "%a cannot be used as a raw identifier, \
-         it must start with a lowercase letter" Style.inline_code lbl
-  | Non_lowercase_delimiter name ->
-      Location.errorf ~loc
-        "%a cannot be used as a quoted string delimiter,@ \
-         it must contain only lowercase letters."
-         Style.inline_code name
-  | Unknown_keyword name ->
-      Location.errorf ~loc
-      "%a has been defined as an additional keyword.@ \
-       This version of OCaml does not support this keyword."
-      Style.inline_code name
-(* FIXME: Invalid_directive? *)
 
 let () =
   Location.register_error_of_exn
@@ -606,35 +750,77 @@ rule token state = parse
       { return QUESTION }
   | "?" (lowercase identchar * as name) ':'
       { oPTLABEL (check_label_name lexbuf name) }
-  | "?" (raw_ident_escape? as escape) (ident_ext as raw_name) ':'
-      { ident_for_extended lexbuf raw_name
-        >>= check_label_name ~raw_escape:(escape<>"") lexbuf
-        |> oPTLABEL }
-  (* | raw_ident_escape (lowercase identchar * as name)
-      { return (LIDENT name) } *)
+  | "?" (lowercase_latin1 identchar_latin1 * as name) ':'
+      { warn_latin1 lexbuf; return (OPTLABEL name) }
+  (* Lowercase identifiers are split into 3 cases, and the order matters
+     (longest to shortest).
+  *)
+  | (lowercase identchar * as name) ('#' symbolchar_or_hash+ as hashop)
+      (* See Note [Lexing hack for hash operators] *)
+      { enqueue_hashop_from_end_of_lexbuf_window lexbuf ~hashop;
+        return (try Hashtbl.find state.keywords name
+              with Not_found ->
+              lookup_keyword name) }
+  | (lowercase identchar * as name) '#'
+      (* See Note [Lexing hack for float#] *)
+      { enqueue_hash_suffix_from_end_of_lexbuf_window lexbuf;
+        return (try Hashtbl.find state.keywords name
+              with Not_found ->
+              lookup_keyword name) }
+  | raw_ident_escape (lowercase identchar * as name)
+    { return (LIDENT name) }
   | lowercase identchar * as name
-    { (find_keyword state lexbuf ~name ~default:(LIDENT name)) }
+    { return (try Hashtbl.find state.keywords name
+              with Not_found ->
+              lookup_keyword name) }
+  (* Lowercase latin1 identifiers are split into 3 cases, and the order matters
+     (longest to shortest).
+  *)
+  | (lowercase_latin1 identchar_latin1 * as name)
+      ('#' symbolchar_or_hash+ as hashop)
+      (* See Note [Lexing hack for hash operators] *)
+      { warn_latin1 lexbuf;
+        enqueue_hashop_from_end_of_lexbuf_window lexbuf ~hashop;
+        return (LIDENT name) }
+  | (lowercase_latin1 identchar_latin1 * as name) '#'
+      (* See Note [Lexing hack for float#] *)
+      { warn_latin1 lexbuf;
+        enqueue_hash_suffix_from_end_of_lexbuf_window lexbuf;
+        return (LIDENT name) }
+  | lowercase_latin1 identchar_latin1 * as name
+      { warn_latin1 lexbuf; return (LIDENT name) }
   | uppercase identchar * as name
     { (* Capitalized keywords for OUnit *)
-      (find_keyword state lexbuf ~name ~default:(UIDENT name))}
-  | (raw_ident_escape? as escape) (ident_ext as raw_name)
-    { let* name = ident_for_extended lexbuf raw_name in
-      if Utf8_lexeme.is_capitalized name then begin
-        if escape="" then return (UIDENT name)
-        else return (UIDENT name)
-          (* we don't have capitalized keywords, and thus no needs for
-             capitalized raw identifiers. *)
-          (*fail lexbuf (Capitalized_raw_identifier name)*)
-      end else return (LIDENT name) }
-  | int_literal as lit { return (INT (lit, None)) }
-  | (int_literal as lit) (literal_modifier as modif)
-    { return (INT (lit, Some modif)) }
-  | float_literal | hex_float_literal as lit
-    { return (FLOAT (lit, None)) }
-  | (float_literal | hex_float_literal as lit) (literal_modifier as modif)
-    { return (FLOAT (lit, Some modif)) }
-  | (float_literal | hex_float_literal | int_literal) identchar+ as invalid
-    { fail lexbuf (Invalid_literal invalid) }
+      return (try Hashtbl.find state.keywords name
+              with Not_found ->
+              try Hashtbl.find keyword_table name
+              with Not_found ->
+                UIDENT name) }
+  | uppercase_latin1 identchar_latin1 * as name
+      { warn_latin1 lexbuf; return (UIDENT name) }
+  (* This matches either an integer literal or a directive. If the text "#2"
+     appears at the beginning of a line that lexes as a directive, then it
+     should be treated as a directive and not an unboxed int. This is acceptable
+     because "#2" isn't a valid unboxed int anyway because it lacks a suffix;
+     the parser rejects unboxed-ints-lacking-suffixes with a more descriptive
+     error message.
+  *)
+  | ('#'? as maybe_hash) (int_literal as lit)
+      { if at_beginning_of_line lexbuf.lex_start_p && maybe_hash = "#" then
+          try directive state (Hash_and_line_num { line_num = lit }) lexbuf
+          with Failure _ -> int ~maybe_hash lit None
+        else int ~maybe_hash lit None
+      }
+  | ('#'? as maybe_hash) (int_literal as lit) (literal_modifier as modif)
+      { int ~maybe_hash lit (Some modif) }
+  | ('#'? as maybe_hash)
+    (float_literal | hex_float_literal as lit)
+      { float ~maybe_hash lit None }
+  | ('#'? as maybe_hash)
+    (float_literal | hex_float_literal as lit) (literal_modifier as modif)
+      { float ~maybe_hash lit (Some modif) }
+  | '#'? (float_literal | hex_float_literal | int_literal) identchar+ as invalid
+      { fail lexbuf (Invalid_literal invalid) }
   | "\""
       { wrap_string_lexer string state lexbuf >>= fun (str, loc) ->
         return (STRING (str, loc, None)) }
@@ -667,22 +853,31 @@ rule token state = parse
         let* delim = validate_delim lexbuf raw_delim in
         let+ s, loc = wrap_string_lexer (quoted_string delim) state lexbuf in
         let idloc = compute_quoted_string_idloc orig_loc 3 id in
-        QUOTED_STRING_ITEM (id, idloc, s, loc, Some delim) }
-  | "\'" newline "\'"
+        return (QUOTED_STRING_ITEM (id, idloc, str, loc, Some delim)) }
+  | ('#'? as maybe_hash)
+    "\'" newline "\'"
     { update_loc lexbuf None 1 false 1;
       (* newline is ('\013'* '\010') *)
-      return (CHAR '\n') }
-  | "\'" ([^ '\\' '\'' '\010' '\013'] as c) "\'"
-    { return (CHAR c) }
-  | "\'\\" (['\\' '\'' '\"' 'n' 't' 'b' 'r' ' '] as c) "\'"
-    { return (CHAR (char_for_backslash c)) }
-  | "\'\\" ['0'-'9'] ['0'-'9'] ['0'-'9'] "\'"
-    { char_for_decimal_code state lexbuf 2 >>= fun c -> return (CHAR c) }
-  | "\'\\" 'o' ['0'-'3'] ['0'-'7'] ['0'-'7'] "\'"
-    { char_for_octal_code state lexbuf 3 >>= fun c -> return (CHAR c) }
-  | "\'\\" 'x' ['0'-'9' 'a'-'f' 'A'-'F'] ['0'-'9' 'a'-'f' 'A'-'F'] "\'"
-    { return (CHAR (char_for_hexadecimal_code lexbuf 3)) }
-  | "\'" ("\\" [^ '#'] as esc)
+      return (char ~maybe_hash '\n') }
+  | ('#'? as maybe_hash)
+    "\'" ([^ '\\' '\'' '\010' '\013'] as c) "\'"
+    { return (char ~maybe_hash c) }
+  | ('#'? as maybe_hash)
+    "\'\\" (['\\' '\'' '\"' 'n' 't' 'b' 'r' ' '] as c) "\'"
+    { return (char ~maybe_hash (char_for_backslash c)) }
+  | ('#'? as maybe_hash)
+    "\'\\" 'o' ['0'-'3'] ['0'-'7'] ['0'-'7'] "\'"
+    { char_for_octal_code state lexbuf (3 + skip_hash ~maybe_hash)
+      >>= fun c -> return (char ~maybe_hash c) }
+  | ('#'? as maybe_hash)
+    "\'\\" ['0'-'9'] ['0'-'9'] ['0'-'9'] "\'"
+    { char_for_decimal_code state lexbuf (2 + skip_hash ~maybe_hash)
+      >>= fun c -> return (char ~maybe_hash c) }
+  | ('#'? as maybe_hash)
+    "\'\\" 'x' ['0'-'9' 'a'-'f' 'A'-'F'] ['0'-'9' 'a'-'f' 'A'-'F'] "\'"
+    { return (char ~maybe_hash
+              (char_for_hexadecimal_code lexbuf (3 + skip_hash ~maybe_hash))) }
+  | '#'? "\'" ("\\" [^ '#'] as esc)
       { fail lexbuf (Illegal_escape (esc, None)) }
   | "(*"
       { let+ s, loc = wrap_comment_lexer state comment lexbuf in
@@ -705,29 +900,24 @@ rule token state = parse
         in
         COMMENT (s, loc) }
   | "(*)"
-      { if !print_warnings then
-          Location.prerr_warning (Location.curr lexbuf) Warnings.Comment_start;
-        let+ s, loc = wrap_comment_lexer state comment lexbuf in
-        COMMENT (s, loc) }
-  | "(*" (('*'*) as stars) "*)"
-      { if !handle_docstrings && stars="" then
-         (* (**) is an empty docstring *)
-          return (DOCSTRING(Docstrings.docstring "" (Location.curr lexbuf)))
-        else
-          return (COMMENT (stars, Location.curr lexbuf)) }
-  | "*)"
       { let loc = Location.curr lexbuf in
-        Location.prerr_warning loc Warnings.Comment_not_end;
-        lexbuf.Lexing.lex_curr_pos <- lexbuf.Lexing.lex_curr_pos - 1;
-        let curpos = lexbuf.lex_curr_p in
-        lexbuf.lex_curr_p <- { curpos with pos_cnum = curpos.pos_cnum - 1 };
-        return STAR
+        Location.prerr_warning loc Warnings.Comment_start;
+        state.comment_start_loc <- [loc];
+        Buffer.reset state.buffer;
+        comment state lexbuf >>= fun end_loc ->
+        let s = Buffer.contents state.buffer in
+        Buffer.reset state.buffer;
+        return (COMMENT (s, { loc with Location.loc_end = end_loc.Location.loc_end }))
       }
+  | "*)" {
+      let loc = Location.curr lexbuf in
+      Location.prerr_warning loc Warnings.Comment_not_end;
+      produce_and_backtrack lexbuf STAR 1
+    }
   | "#"
-      { let at_beginning_of_line pos = (pos.pos_cnum = pos.pos_bol) in
-        if not (at_beginning_of_line lexbuf.lex_start_p)
+      { if not (at_beginning_of_line lexbuf.lex_start_p)
         then return HASH
-        else try directive state lexbuf with Failure _ -> return HASH
+        else try directive state Hash lexbuf with Failure _ -> return HASH
       }
   | "&"  { return AMPERSAND }
   | "&&" { return AMPERAMPER }
@@ -735,12 +925,21 @@ rule token state = parse
   | "\'" { return QUOTE }
   | "("  { return LPAREN }
   | ")"  { return RPAREN }
+  | "#(" { return HASHLPAREN }
+  | "#{" { return HASHLBRACE }
   | "*"  { return STAR }
   | ","  { return COMMA }
   | "->" { return MINUSGREATER }
+  | "$" {
+      if !(Syntax_mode.quotations) then
+        return DOLLAR
+      else
+        return (INFIXOP0 "$")
+    }
   | "."  { return DOT }
-  | "." (dotsymbolchar symbolchar* as op) { return (DOTOP op) }
   | ".." { return DOTDOT }
+  | ".#" { return DOTHASH }
+  | "." (dotsymbolchar symbolchar* as op) { return (DOTOP op) }
   | ":"  { return COLON }
   | "::" { return COLONCOLON }
   | ":=" { return COLONEQUAL }
@@ -748,18 +947,34 @@ rule token state = parse
   | ";"  { return SEMI }
   | ";;" { return SEMISEMI }
   | "<"  { return LESS }
+  | "<[" {
+      if !(Syntax_mode.quotations) then
+        return LESSLBRACKET
+      else
+        (* Put back the '[' and return just LESS *)
+        produce_and_backtrack lexbuf LESS 1
+    }
   | "<-" { return LESSMINUS }
   | "="  { return EQUAL }
   | "["  { return LBRACKET }
   | "[|" { return LBRACKETBAR }
+  | "[:" { return LBRACKETCOLON }
   | "[<" { return LBRACKETLESS }
   | "[>" { return LBRACKETGREATER }
   | "]"  { return RBRACKET }
+  | "]>" {
+      if !(Syntax_mode.quotations) then
+        return RBRACKETGREATER
+      else
+        (* Put back the '>' and return just RBRACKET *)
+        produce_and_backtrack lexbuf RBRACKET 1
+    }
   | "{"  { return LBRACE }
   | "{<" { return LBRACELESS }
   | "|"  { return BAR }
   | "||" { return BARBAR }
   | "|]" { return BARRBRACKET }
+  | ":]" { return COLONRBRACKET }
   | ">"  { return GREATER }
   | ">]" { return GREATERRBRACKET }
   | "}"  { return RBRACE }
@@ -784,6 +999,8 @@ rule token state = parse
   | ['=' '<' '>' '|' '&' '$'] symbolchar * as op
             { return (keyword_or state op
                        (INFIXOP0 op)) }
+  | "@" { return AT }
+  | "@@" { return ATAT }
   | ['@' '^'] symbolchar * as op
             { return (INFIXOP1 op) }
   | ['+' '-'] symbolchar * as op
@@ -806,22 +1023,67 @@ rule token state = parse
   | _ as illegal_char
       { fail lexbuf (Illegal_character illegal_char) }
 
-and directive state = parse
-  | ([' ' '\t']* (['0'-'9']+ as num) [' ' '\t']*
-        ("\"" ([^ '\010' '\013' '\"' ] * as name) "\"") as directive)
+(* An example of a directive is:
+
+#4 "filename.ml"
+
+   Here, 4 is the line number and filename.ml is the file name. The '#' must
+   appear in column 0.
+
+   The [directive] lexer is called when some portion of the start of
+   the line was already consumed, either just the '#' or the '#4'. That's
+   indicated by the [already_consumed] argument. The caller is responsible
+   for checking that the '#' appears in column 0.
+*)
+and directive state already_consumed = parse
+  (* Expects to receive a line number from exactly one source (either the lexbuf or
+     the [already_consumed] argument, but not both) and will fail if this isn't
+     the case. *)
+  | ([' ' '\t']* (['0'-'9']+? as line_num_opt) [' ' '\t']*
+     ("\"" ([^ '\010' '\013' '\"' ] * as name) "\"") as directive)
         [^ '\010' '\013'] *
-      {
+      { let num =
+          match already_consumed, line_num_opt with
+          | Hash_and_line_num { line_num }, "" -> line_num
+          | Hash, "" ->
+              directive_error lexbuf "expected line number"
+                ~already_consumed ~directive
+          | Hash_and_line_num _, _ ->
+              directive_error lexbuf "expected just one line number"
+                ~already_consumed ~directive
+          | Hash, num -> num
+        in
         match int_of_string num with
         | exception _ ->
             (* PR#7165 *)
-            let explanation = "line number out of range" in
-            fail lexbuf (Invalid_directive ("#" ^ directive, Some explanation))
+            directive_error lexbuf "line number out of range"
+              ~already_consumed ~directive
         | line_num ->
            (* Documentation says that the line number should be
               positive, but we have never guarded against this and it
               might have useful hackish uses. *)
             update_loc lexbuf (Some name) (line_num - 1) true 0;
             token state lexbuf
+      }
+  | "syntax" [' ' '\t']+ (lowercase identchar* as mode) [' ' '\t']+
+    (lowercase identchar* as toggle) [^ '\010' '\013']*
+      { let toggle =
+          match toggle with
+          | "on" -> true
+          | "off" -> false
+          | _ ->
+              directive_error lexbuf
+                ("syntax directive can only be toggled on or off; "
+                 ^ toggle ^ " not recognized")
+                ~already_consumed ~directive:"syntax"
+        in
+        match mode with
+        | "quotations" ->
+            Syntax_mode.quotations := toggle;
+            token state lexbuf
+        | _ ->
+            directive_error lexbuf ("unknown syntax mode " ^ mode)
+              ~already_consumed ~directive:"syntax"
       }
 and comment state = parse
     "(*"
@@ -885,8 +1147,8 @@ and comment state = parse
           comment state lexbuf }
 
   | "\'\'"
-      { store_lexeme state.buffer lexbuf; comment state lexbuf }
-  | "\'" (newline as nl) "\'"
+      { Buffer.add_string state.buffer (Lexing.lexeme lexbuf); comment state lexbuf }
+  | "'" (newline as nl) "'"
       { update_loc lexbuf None 1 false 1;
         store_string_char state.buffer '\'';
         store_normalized_newline state.buffer nl;
@@ -923,8 +1185,8 @@ and comment state = parse
 
 and string state = parse
     '\"'
-      { return lexbuf.lex_start_p  }
-  | '\\' (newline as nl) ([' ' '\t'] * as space)
+      { return lexbuf.lex_start_p }
+  | '\\' newline ([' ' '\t'] * as space)
       { update_loc lexbuf None 1 false (String.length space);
         if in_comment state then begin
           store_string_char state.buffer '\\';
@@ -1009,6 +1271,14 @@ and skip_sharp_bang state = parse
 
   (* preprocessor support not implemented, not compatible with monadic
      interface *)
+
+  let token state lexbuf =
+    match Queue.take_opt deferred_tokens with
+    | None -> token state lexbuf
+    | Some { token; start_pos; end_pos } ->
+        lexbuf.lex_start_p <- start_pos;
+        lexbuf.lex_curr_p <- end_pos;
+        return token
 
   let rec token_without_comments state lexbuf =
     token state lexbuf >>= function

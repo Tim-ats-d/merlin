@@ -49,8 +49,12 @@ val class_type: Format.formatter -> Parsetree.class_type -> unit
 val module_type: Format.formatter -> Parsetree.module_type -> unit
 val structure_item: Format.formatter -> Parsetree.structure_item -> unit
 val signature_item: Format.formatter -> Parsetree.signature_item -> unit
+val signature_items: Format.formatter -> Parsetree.signature_item list -> unit
 val binding: Format.formatter -> Parsetree.value_binding -> unit
 val payload: Format.formatter -> Parsetree.payload -> unit
+
+val class_signature: Format.formatter -> Parsetree.class_signature -> unit
+val type_declaration: Format.formatter -> Parsetree.type_declaration -> unit
 
 val tyvar_of_name : string -> string
   (** Turn a type variable name into a valid identifier, taking care of the
@@ -61,6 +65,9 @@ val tyvar: Format.formatter -> string -> unit
   (** Print a type variable name as a valid identifier, taking care of the
       special treatment required for the single quote character in second
       position, or for keywords by escaping them with \#. No-op on "_". *)
+
+val jkind_annotation : Format.formatter -> Parsetree.jkind_annotation -> unit
+val mode : Format.formatter -> Parsetree.mode Location.loc -> unit
 
 (* merlin *)
 type longindent_kind =

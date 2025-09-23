@@ -487,21 +487,34 @@ let all_commands =
     command "locate"
       ~spec:
         [ optional "-prefix" "<string> Prefix to complete"
-            (Marg.param "string" (fun txt (_, pos, kind) ->
-                 (Some txt, pos, kind)));
+            (Marg.param "string" (fun txt (_, pos, kind, ctx) ->
+                 (Some txt, pos, kind, ctx)));
           arg "-position" "<position> Position to complete"
-            (marg_position (fun pos (prefix, _pos, kind) -> (prefix, pos, kind)));
+            (marg_position (fun pos (prefix, _pos, kind, ctx) ->
+                 (prefix, pos, kind, ctx)));
           optional "-look-for"
             "<interface|implementation> Prefer opening interface or \
              implementation"
             (Marg.param "<interface|implementation>"
-               (fun kind (prefix, pos, _) ->
+               (fun kind (prefix, pos, _, ctx) ->
                  match kind with
-                 | "mli" | "interface" -> (prefix, pos, `MLI)
-                 | "ml" | "implementation" -> (prefix, pos, `ML)
+                 | "mli" | "interface" -> (prefix, pos, `MLI, ctx)
+                 | "ml" | "implementation" -> (prefix, pos, `ML, ctx)
                  | str ->
                    failwithf "expecting interface or implementation, got %S."
-                     str))
+                     str));
+          (let contexts =
+             let open Query_protocol.Locate_context in
+             all |> List.map ~f:to_string |> String.concat ~sep:"|"
+           in
+           optional "-context"
+             (Format.sprintf
+                "<%s> Which context to search for the identifier in" contexts)
+             (Marg.param (Format.sprintf "<%s>" contexts)
+                (fun ctx (prefix, pos, kind, _) ->
+                  match Query_protocol.Locate_context.of_string ctx with
+                  | Some ctx -> (prefix, pos, kind, Some ctx)
+                  | None -> failwithf "invalid context %s." ctx)))
         ]
       ~doc:
         "Finds the declaration of entity at the specified position, Or \
@@ -511,15 +524,13 @@ let all_commands =
          - `{'pos': position}` if the location is in the current buffer,\n\
          - `{'file': string, 'pos': position}` if definition is located in a \
          different file."
-      ~default:(None, `None, `MLI)
+      ~default:(None, `None, `MLI, None)
       begin
-        fun shared config source (prefix, pos, lookfor) ->
+        fun buffer (prefix, pos, lookfor, context) ->
           match pos with
           | `None -> failwith "-position <pos> is mandatory"
           | #Msource.position as pos ->
-            let position = Msource.get_position source pos in
-            run ~position shared config source
-              (Query_protocol.Locate (prefix, lookfor, pos))
+            run buffer (Query_protocol.Locate (prefix, lookfor, pos, context))
       end;
     command "locate-type"
       ~spec:
@@ -561,15 +572,21 @@ let all_commands =
             run shared config source
               (Query_protocol.Occurrences (`Ident_at pos, scope))
       end;
-    command "outline" ~spec:[]
+    command "outline"
+      ~spec:
+        [ optional "-include-types"
+            "<true|false> (default: true) If false, don't print any types in \
+             the output"
+            (Marg.bool (fun include_types _ -> include_types))
+        ]
       ~doc:
         "Returns a tree of objects `{'start': position, 'end': position, \
          'name': string, 'kind': string, 'children': subnodes}` describing the \
          content of the buffer."
-      ~default:()
+      ~default:true
       begin
-        fun shared config source () ->
-          run shared config source Query_protocol.Outline
+        fun buffer include_types ->
+          run buffer (Query_protocol.Outline { include_types })
       end;
     command "path-of-source"
       ~doc:
@@ -820,6 +837,65 @@ let all_commands =
             let position = Msource.get_position source pos in
             run ~position shared config source (Query_protocol.Shape pos)
       end;
+    command "stack-or-heap-enclosing"
+      ~doc:
+        "Returns a list of the \"stack-or-heap\" for all expressions that \
+         could allocate at given position, sorted by increasing size.\n\
+         That is, asking for stack-or-heap-enclosing around `{ foo = (Bar baz) \
+         }` will return whether `Bar baz` allocates on the heap or the stack, \
+         and also whether the entire record allocates on the heap or the stack.\n\
+         Expressions that never allocate (like function applications) are \
+         skipped.\n\
+         Expressions that are statically known not to allocate (like unboxed \
+         records) give \"does not allocate\" with a summary of the reason \
+         there is no allocation.\n\
+         Expressions that may allocate give \"stack\", \"heap\", or \"couldn't \
+         tell whether stack or heap\". The latter indicates that locality of \
+         the expression is underconstrained.\n\
+         Expressions to which the typechecker failed to ascribe an allocation \
+         mode, but which do not fit into one of the aformentioned categories \
+         of expressions known not to allocate, give \"unknown (does your code \
+         contain a type error?)\". As suggested by the message, this should \
+         only occur if the input does not typecheck.\n\n\
+         `-lsp-compat` can be used to change the locations reported for better \
+         LSP hover interaction.\n\n\
+         `-index` can be used to print only one \"stack-or-heap\".\n\n\
+         The result is returned as a list of:\n\
+         ```javascript\n\
+         {\n\
+        \  'start': position,\n\
+        \  'end': position,\n\
+        \  'stack_or_heap: string\n\
+         }\n\
+         ```"
+      ~spec:
+        [ arg "-position" "<position> Position to complete"
+            (marg_position (fun pos (expr, cursor, _pos, lsp_compat, index) ->
+                 (expr, cursor, pos, lsp_compat, index)));
+          optional "-lsp-compat"
+            "<bool> Report ranges that are less accurate but work better with \
+             LSP hover"
+            (Marg.param "bool"
+               (fun lsp_compat (expr, cursor, pos, _lsp_compat, index) ->
+                 match bool_of_string lsp_compat with
+                 | lsp_compat -> (expr, cursor, pos, lsp_compat, index)
+                 | exception _ -> failwith "lsp_compat should be a bool"));
+          optional "-index" "<int> Only print type of <index>'th result"
+            (Marg.param "int"
+               (fun index (expr, cursor, pos, lsp_compat, _index) ->
+                 match int_of_string index with
+                 | index -> (expr, cursor, pos, lsp_compat, Some index)
+                 | exception _ -> failwith "index should be an integer"))
+        ]
+      ~default:("", -1, `None, false, None)
+      begin
+        fun buffer (_, _, pos, lsp_compat, index) ->
+          match pos with
+          | `None -> failwith "-position <pos> is mandatory"
+          | #Msource.position as pos ->
+            run buffer
+              (Query_protocol.Stack_or_heap_enclosing (pos, lsp_compat, index))
+      end;
     command "type-enclosing"
       ~doc:
         "Returns a list of type information for all expressions at given \
@@ -962,10 +1038,15 @@ let all_commands =
               (Query_protocol.Signature_help sh)
       end;
     (* Used only for testing *)
+    command "version" ~spec:[] ~default:() ~doc:"Print version information"
+      begin
+        fun buffer () -> run buffer Query_protocol.Version
+      end;
+    (* Used only for testing *)
     command "dump"
       ~spec:
         [ arg "-what"
-            "<source|parsetree|ppxed-source|ppxed-parsetree|typedtree|env|fullenv|browse|tokens|flags|warnings|exn|paths> \
+            "<source|parsetree|ppxed-source|ppxed-parsetree|typedtree|env|fullenv|browse|tokens|flags|warnings|exn|paths|hidden-paths> \
              Information to dump ()"
             (Marg.param "string" (fun what _ -> what))
         ]

@@ -21,7 +21,14 @@ type ocaml =
     open_modules : string list;
     ppx : string with_workdir list;
     pp : string with_workdir option;
-    warnings : Warnings.state
+    warnings : Warnings.state;
+    cmi_file : string option;
+    parameters : string list;
+    as_parameter : bool;
+    as_argument_for : string option;
+    zero_alloc_check : Zero_alloc_annotations.Check.t;
+    zero_alloc_assert : Zero_alloc_annotations.Assert.t;
+    infer_with_bounds : bool
   }
 
 let dump_warnings st =
@@ -46,7 +53,14 @@ let dump_ocaml x =
       ("open_modules", Json.list Json.string x.open_modules);
       ("ppx", Json.list (dump_with_workdir Json.string) x.ppx);
       ("pp", Json.option (dump_with_workdir Json.string) x.pp);
-      ("warnings", dump_warnings x.warnings)
+      ("warnings", dump_warnings x.warnings);
+      ("cmi_file", Json.option Json.string x.cmi_file);
+      ("parameters", `List (List.map ~f:Json.string x.parameters));
+      ("as_parameter", `Bool x.as_parameter);
+      ( "zero_alloc_check",
+        `String (Zero_alloc_annotations.Check.to_string x.zero_alloc_check) );
+      ( "zero_alloc_assert",
+        `String (Zero_alloc_annotations.Assert.to_string x.zero_alloc_assert) )
     ]
 
 (** Some paths can be resolved relative to a current working directory *)
@@ -82,6 +96,7 @@ type merlin =
     stdlib : string option;
     source_root : string option;
     unit_name : string option;
+    unit_name_for : string String.Map.t;
     wrapping_prefix : string option;
     reader : string list;
     protocol : [ `Json | `Sexp ];
@@ -119,6 +134,11 @@ let dump_merlin x =
       ("stdlib", Json.option Json.string x.stdlib);
       ("source_root", Json.option Json.string x.source_root);
       ("unit_name", Json.option Json.string x.unit_name);
+      ( "unit_name_for",
+        let alist =
+          x.unit_name_for |> String.Map.map ~f:Json.string |> String.Map.to_list
+        in
+        `Assoc alist );
       ("wrapping_prefix", Json.option Json.string x.wrapping_prefix);
       ("reader", `List (List.map ~f:Json.string x.reader));
       ( "protocol",
@@ -256,13 +276,21 @@ let merge_merlin_config dot merlin ~failures ~config_path =
     extensions = dot.extensions @ merlin.extensions;
     suffixes = dot.suffixes @ merlin.suffixes;
     stdlib = (if dot.stdlib = None then merlin.stdlib else dot.stdlib);
-    source_root =
-      (if dot.source_root = None then merlin.source_root else dot.source_root);
     unit_name =
       (if dot.unit_name = None then merlin.unit_name else dot.unit_name);
+    unit_name_for =
+      String.Map.merge
+        ~f:(fun _ dot merlin ->
+          match (dot, merlin) with
+          | Some dot, _ -> Some dot
+          | None, Some merlin -> Some merlin
+          | None, None -> None)
+        dot.unit_name_for merlin.unit_name_for;
     wrapping_prefix =
       (if dot.wrapping_prefix = None then merlin.wrapping_prefix
        else dot.wrapping_prefix);
+    source_root =
+      (if dot.source_root = None then merlin.source_root else dot.source_root);
     reader = (if dot.reader = [] then merlin.reader else dot.reader);
     flags_to_apply = dot.flags @ merlin.flags_to_apply;
     failures = failures @ merlin.failures;
@@ -330,7 +358,7 @@ let merlin_flags =
             { merlin with suffixes = (impl, intf) :: merlin.suffixes }
           | _ -> merlin),
       "Add a suffix implementation,interface pair" );
-    ( "-extension",
+    ( "-merlin-extension",
       Marg.param "extension" (fun extension merlin ->
           match Extension.lookup extension with
           | None -> invalid_arg "Unknown extension"
@@ -401,38 +429,31 @@ let ocaml_ignored_flags =
     "-annot";
     "-app-funct";
     "-bin-annot";
+    "-bin-annot-cms";
     "-c";
     "-compact";
     "-compat-32";
     "-config";
     "-custom";
-    "-dalloc";
     "-dclambda";
     "-dcmm";
-    "-dcombine";
     "-dcse";
     "-dflambda";
     "-dflambda-no-invariants";
     "-dflambda-verbose";
     "-dinstr";
-    "-dinterf";
     "-dlambda";
+    "-dblambda";
     "-dlinear";
-    "-dlive";
     "-dparsetree";
-    "-dprefer";
     "-dshape";
     "-drawclambda";
     "-drawflambda";
     "-drawlambda";
-    "-dreload";
-    "-dscheduling";
-    "-dsel";
     "-dsource";
-    "-dspill";
-    "-dsplit";
     "-dstartup";
     "-dtimings";
+    "-dprofile";
     "-dtypedtree";
     "-dtypes";
     "-dump-pass";
@@ -465,6 +486,7 @@ let ocaml_ignored_flags =
     "-O2";
     "-O3";
     "-Oclassic";
+    "-only-erasable-extensions";
     "-opaque";
     "-output-complete-obj";
     "-output-obj";
@@ -477,7 +499,140 @@ let ocaml_ignored_flags =
     "-unboxed-types";
     "-v";
     "-verbose";
-    "-where"
+    "-where";
+    "-no-absname";
+    "-no-g";
+    "-safe-matching";
+    "-bin-annot-occurrences";
+    (* flambda-backend specific *)
+    "-basic-block-sections";
+    "-caml-apply-inline-fast-path";
+    "-debug-ocaml";
+    "-dgc-timings";
+    "-flambda2-backend-cse-at-toplevel";
+    "-flambda2-debug";
+    "-flambda2-debug-concrete-types-only-on-canonicals";
+    "-flambda2-debug-keep-invalid-handlers";
+    "-flambda2-debug-permute-every-name";
+    "-flambda2-expert-can-inline-recursive-functions";
+    "-flambda2-expert-code-id-and-symbol-scoping-checks";
+    "-flambda2-expert-fallback-inlining-heuristic";
+    "-flambda2-expert-inline-effects-in-cmm";
+    "-flambda2-expert-phantom-lets";
+    "-flambda2-inlining-report-bin";
+    "-flambda2-join-points";
+    "-no-flambda2-result-types";
+    "-flambda2-result-types-all-functions";
+    "-flambda2-result-types-functors-only";
+    "-flambda2-speculative-inlining-only-if-arguments-useful";
+    "-flambda2-unbox-along-intra-function-control-flow";
+    "-flambda2-unicode";
+    "-flambda2-kind-checks";
+    "-no-flambda2-backend-cse-at-toplevel";
+    "-no-flambda2-debug";
+    "-no-flambda2-debug-concrete-types-only-on-canonicals";
+    "-no-flambda2-debug-keep-invalid-handlers";
+    "-no-flambda2-debug-permute-every-name";
+    "-no-flambda2-expert-can-inline-recursive-functions";
+    "-no-flambda2-expert-code-id-and-symbol-scoping-checks";
+    "-no-flambda2-expert-fallback-inlining-heuristic";
+    "-no-flambda2-expert-inline-effects-in-cmm";
+    "-no-flambda2-expert-phantom-lets";
+    "-no-flambda2-join-points";
+    "-no-flambda2-speculative-inlining-only-if-arguments-useful";
+    "-no-flambda2-unbox-along-intra-function-control-flow";
+    "-ocamlcfg";
+    "-no-ocamlcfg";
+    "-regalloc-validate";
+    "-no-regalloc-validate";
+    "-use-cached-generic-functions";
+    "-flambda2-expert-shorten-symbol-names";
+    "-no-flambda2-expert-shorten-symbol-names";
+    "-symbol-visibility-protected";
+    "-no-symbol-visibility-protected";
+    "-flambda2-basic-meet";
+    "-flambda2-advanced-meet";
+    "-directory";
+    (* Jane Street specific *)
+    "-disable-builtin-check";
+    "-disable-poll-insertion";
+    "-gdwarf-may-alter-codegen";
+    "-gno-dwarf-may-alter-codegen";
+    "-davail";
+    "-dranges";
+    "-ddebug-invariants";
+    "-cfg-peephole-optimize";
+    "-no-cfg-peephole-optimize";
+    "-verbose-types";
+    "-no-verbose-types";
+    "-fsse3";
+    "-fno-sse3";
+    "-fssse3";
+    "-fno-ssse3";
+    "-fsse41";
+    "-fno-sse41";
+    "-fsse42";
+    "-fno-sse42";
+    "-fsimd-regalloc";
+    "-fno-simd-regalloc";
+    "-fclmul";
+    "-fno-clmul";
+    "-no-auto-include-otherlibs";
+    "-fbmi2";
+    "-fno-bmi2";
+    "-fbmi";
+    "-fno-bmi";
+    "-fprefetchwt1";
+    "-fno-prefetchwt1";
+    "-fprefetchw";
+    "-fno-prefetchw";
+    "-fpopcnt";
+    "-fno-popcnt";
+    "-disable-zero-alloc-checker";
+    "-disable-precise-zero-alloc-checker";
+    "-cfg-stack-checks";
+    "-no-cfg-stack-checks";
+    "-gdwarf-inlined-frames";
+    "-gno-dwarf-inlined-frames";
+    "-cfg-stack-checks";
+    "-no-cfg-stack-checks";
+    "-gno-upstream-dwarf";
+    "-dzero-alloc";
+    "-dletreclambda";
+    "-dcounters";
+    "-vectorize";
+    "-no-vectorize";
+    "-dvectorize";
+    "-dump-into-csv";
+    "-no-mach-ir";
+    "-flambda2-reaper";
+    "-no-flambda2-reaper";
+    "-dsimplify";
+    "-dreaper";
+    "-instantiate";
+    "-dflambda-heavy-invariants";
+    "-cfg-eliminate-dead-trap-handlers";
+    "-no-cfg-eliminate-dead-trap-handlers";
+    "-module-entry-functions-section";
+    "-zero-alloc-checker-details-extra";
+    "-no-zero-alloc-checker-details-extra";
+    "-favx512f";
+    "-fno-avx512f";
+    "-favx2";
+    "-fno-avx2";
+    "-favx";
+    "-fno-avx";
+    "-dllvmir";
+    "-keep-llvmir";
+    "-llvm-path";
+    "-ddwarf-types";
+    "-ocamlcfg";
+    "-cfg-prologue-validate";
+    "-no-cfg-prologue-validate";
+    "-cfg-prologue-shrink-wrap";
+    "-no-cfg-prologue-shrink-wrap";
+    "-gdwarf-pedantic";
+    "-ddwarf-metrics"
   ]
 
 let ocaml_ignored_parametrized_flags =
@@ -507,13 +662,66 @@ let ocaml_ignored_parametrized_flags =
     "-o";
     "-rounds";
     "-runtime-variant";
+    "-ocamlrunparam";
     "-unbox-closures-factor";
     "-use-prims";
     "-use_runtime";
     "-use-runtime";
     "-error-style";
     "-dump-dir";
-    "-cmi-file"
+    "-I-paths";
+    "-H-paths";
+    (* flambda-backend specific *)
+    "-extension";
+    "-extension-universe";
+    "-drawfexpr-to";
+    "-dfexpr-to";
+    "-dflexpect-to";
+    "-reorder-blocks-random";
+    "-heap-reduction-threshold";
+    "-flambda2-cse-depth";
+    "-flambda2-expert-max-block-size-for-projections";
+    "-flambda2-expert-max-unboxing-depth";
+    "-flambda2-join-depth";
+    "-flambda2-inline-alloc-cost";
+    "-flambda2-inline-branch-cost";
+    "-flambda2-inline-call-cost";
+    "-flambda2-inline-indirect-cost";
+    "-flambda2-inline-large-function-size";
+    "-flambda2-inline-max-depth";
+    "-flambda2-inline-max-rec-depth";
+    "-flambda2-inline-poly-compare-cost";
+    "-flambda2-inline-prim-cost";
+    "-flambda2-inline-small-function-size";
+    "-flambda2-inline-threshold";
+    "-flambda2-join-algorithm";
+    "-flambda2-expert-cont-specialization-budget";
+    "-regalloc";
+    "-regalloc-linscan-threshold";
+    "-regalloc-param";
+    "-cached-generic-functions-path";
+    "-gdwarf-max-function-complexity";
+    "-function-layout";
+    "-cfg-stack-checks-threshold";
+    "-zero-alloc-checker-details-cutoff";
+    "-zero-alloc-checker-join";
+    "-dgranularity";
+    "-flambda2-expert-cont-lifting-budget";
+    "-vectorize-max-block-size";
+    "-save-ir-before";
+    "-shape-format";
+    "-gdwarf-compression";
+    "-gdwarf-fission";
+    "-cfg-prologue-shrink-wrap-threshold";
+    "-gdwarf-config-shape-reduce-depth";
+    "-gdwarf-config-shape-eval-depth";
+    "-gdwarf-config-max-cms-files-per-unit";
+    "-gdwarf-config-max-cms-files-per-variable";
+    "-gdwarf-config-max-type-to-shape-depth";
+    "-gdwarf-config-max-shape-reduce-steps-per-variable";
+    "-gdwarf-config-max-evaluation-steps-per-variable";
+    "-gdwarf-config-shape-reduce-fuel";
+    "-gdwarf-fidelity"
   ]
 
 let ocaml_warnings_spec ~error =
@@ -632,7 +840,43 @@ let ocaml_flags =
         \        ++<alertname> treat <alertname> as fatal error\n\
         \        --<alertname> treat <alertname> as non-fatal\n\
         \        @<alertname>  enable <alertname> and treat it as fatal error\n\
-        \    <alertname> can be 'all' to refer to all alert names" )
+        \    <alertname> can be 'all' to refer to all alert names" );
+    ( "-cmi-file",
+      Marg.param "file" (fun cmi_file ocaml ->
+          { ocaml with cmi_file = Some cmi_file }),
+      "<file>  Use the <file> interface to type-check" );
+    ( "-parameter",
+      Marg.param "module name" (fun parameter ocaml ->
+          { ocaml with parameters = parameter :: ocaml.parameters }),
+      "<module name> Compile the module with <module name> as a parameter." );
+    ( "-as-parameter",
+      Marg.unit (fun ocaml -> { ocaml with as_parameter = true }),
+      " Compile the interface as a parameter module." );
+    ( "-as-argument-for",
+      Marg.param "module name" (fun as_argument_for ocaml ->
+          { ocaml with as_argument_for = Some as_argument_for }),
+      "<module name> Compile the module as an argument for the named parameter."
+    );
+    ( "-zero-alloc-check",
+      Marg.param "string" (fun zero_alloc_str ocaml ->
+          match Zero_alloc_annotations.Check.of_string zero_alloc_str with
+          | Some zero_alloc_check -> { ocaml with zero_alloc_check }
+          | None ->
+            failwith ("Invalid value for -zero-alloc-check: " ^ zero_alloc_str)),
+      " Check that annotated functions do not allocate and do not have \
+       indirect calls. " ^ Zero_alloc_annotations.Check.doc );
+    ( "-zero-alloc-assert",
+      Marg.param "string" (fun zero_alloc_str ocaml ->
+          match Zero_alloc_annotations.Assert.of_string zero_alloc_str with
+          | Some zero_alloc_assert -> { ocaml with zero_alloc_assert }
+          | None ->
+            failwith ("Invalid value for -zero-alloc-assert: " ^ zero_alloc_str)),
+      " Add zero_alloc annotations to all functions. "
+      ^ Zero_alloc_annotations.Assert.doc );
+    ( "-infer-with-bounds",
+      Marg.unit (fun ocaml -> { ocaml with infer_with_bounds = true }),
+      "Infer with-bounds on kinds for type declarations. May impact \
+       performance." )
   ]
 
 (** {1 Main configuration} *)
@@ -655,7 +899,14 @@ let initial =
         open_modules = [];
         ppx = [];
         pp = None;
-        warnings = Warnings.backup ()
+        warnings = Warnings.backup ();
+        cmi_file = None;
+        parameters = [];
+        as_parameter = false;
+        as_argument_for = None;
+        zero_alloc_check = Zero_alloc_annotations.Check.Check_default;
+        zero_alloc_assert = Zero_alloc_annotations.Assert.Assert_default;
+        infer_with_bounds = false
       };
     merlin =
       { build_path = [];
@@ -670,6 +921,7 @@ let initial =
         stdlib = None;
         source_root = None;
         unit_name = None;
+        unit_name_for = String.Map.empty;
         wrapping_prefix = None;
         reader = [];
         protocol = `Json;
@@ -778,6 +1030,9 @@ let source_path config =
     ]
   |> List.filter_dup
 
+let hidden_source_path config =
+  config.merlin.hidden_source_path @ config.ocaml.hidden_dirs
+
 let collect_paths ~log_title ~config paths =
   let dirs =
     match config.ocaml.threads with
@@ -828,10 +1083,14 @@ let unitname t =
   | Some name -> Misc.unitname name
   | None ->
     let basename = Misc.unitname t.query.filename in
+    (* CR: get rid of wrapping_prefix. it is only here for legacy reasons at the moment *)
     begin
       match t.merlin.wrapping_prefix with
-      | Some prefix -> prefix ^ basename
-      | None -> basename
+      | Some prefix -> Misc.unitname (prefix ^ basename)
+      | None ->
+        String.Map.find_opt basename t.merlin.unit_name_for
+        |> Option.map ~f:Misc.unitname
+        |> Option.value ~default:basename
     end
 
 let intf_or_impl t =

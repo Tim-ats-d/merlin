@@ -111,3 +111,11 @@ let reconstruct_identifier pipeline pos = function
       else aux acc (succ i)
     in
     aux [] offset
+
+let is_current_unit comp_unit =
+  match Env.get_unit_name () with
+  | Some current_unit ->
+    String.equal
+      (current_unit |> Unit_info.modname |> Compilation_unit.name_as_string)
+      comp_unit
+  | None -> false

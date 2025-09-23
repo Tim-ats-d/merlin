@@ -56,6 +56,15 @@ let dump (type a) : a t -> json =
   | Type_expr (expr, pos) ->
     mk "type-expression"
       [ ("expression", `String expr); ("position", mk_position pos) ]
+  | Stack_or_heap_enclosing (pos, lsp_compat, index) ->
+    mk "stack-or-heap-enclosing"
+      [ ( "index",
+          match index with
+          | None -> `String "all"
+          | Some n -> `Int n );
+        ("lsp-compat", `Bool lsp_compat);
+        ("position", mk_position pos)
+      ]
   | Type_enclosing (opt_cursor, pos, index) ->
     mk "type-enclosing"
       [ ( "cursor",
@@ -97,7 +106,7 @@ let dump (type a) : a t -> json =
   | Syntax_document pos ->
     mk "syntax-document" [ ("position", mk_position pos) ]
   | Expand_ppx pos -> mk "ppx-expand" [ ("position", mk_position pos) ]
-  | Locate (prefix, look_for, pos) ->
+  | Locate (prefix, look_for, pos, context) ->
     mk "locate"
       [ ( "prefix",
           match prefix with
@@ -107,7 +116,12 @@ let dump (type a) : a t -> json =
           match look_for with
           | `ML -> `String "implementation"
           | `MLI -> `String "interface" );
-        ("position", mk_position pos)
+        ("position", mk_position pos);
+        ( "context",
+          match context with
+          | Some context ->
+            `String (Query_protocol.Locate_context.to_string context)
+          | None -> `Null )
       ]
   | Jump (target, pos) ->
     mk "jump" [ ("target", `String target); ("position", mk_position pos) ]
@@ -149,7 +163,8 @@ let dump (type a) : a t -> json =
         ("hint-function-params", `Bool hint_function_params);
         ("avoid-ghost-location", `Bool ghost)
       ]
-  | Outline -> mk "outline" []
+  | Outline { include_types } ->
+    mk "outline" [ ("include-types", `Bool include_types) ]
   | Errors { lexing; parsing; typing } ->
     let args =
       if lexing && parsing && typing then []
@@ -242,6 +257,14 @@ let with_location ?(with_file = false) ?(skip_none = false) loc assoc =
       @@ ("start", Lexing.json_of_position loc.Location.loc_start)
          :: ("end", Lexing.json_of_position loc.Location.loc_end)
          :: assoc)
+
+let json_of_stack_or_heap (loc, desc) =
+  with_location loc
+    [ ( "stack_or_heap",
+        match desc with
+        | `String _ as str -> str
+        | `Index n -> `Int n )
+    ]
 
 let json_of_type_loc (loc, desc, tail) =
   with_location loc
@@ -411,6 +434,8 @@ let json_of_search_result list =
 let json_of_response (type a) (query : a t) (response : a) : json =
   match (query, response) with
   | Type_expr _, str -> `String str
+  | Stack_or_heap_enclosing _, results ->
+    `List (List.map ~f:json_of_stack_or_heap results)
   | Type_enclosing _, results -> `List (List.map ~f:json_of_type_loc results)
   | Enclosing _, results ->
     `List (List.map ~f:(fun loc -> with_location loc []) results)
@@ -437,11 +462,16 @@ let json_of_response (type a) (query : a t) (response : a) : json =
   end
   | Syntax_document _, resp -> (
     match resp with
-    | `Found info ->
+    | `Found { name; description; documentation; level } ->
       `Assoc
-        [ ("name", `String info.name);
-          ("description", `String info.description);
-          ("url", `String info.documentation)
+        [ ("name", `String name);
+          ("description", `String description);
+          ("url", Json.option (fun s -> `String s) documentation);
+          ( "level",
+            `String
+              (match level with
+              | Simple -> "simple"
+              | Advanced -> "advanced") )
         ]
     | `No_documentation -> `String "No documentation found")
   | Expand_ppx _, resp ->
@@ -488,7 +518,7 @@ let json_of_response (type a) (query : a t) (response : a) : json =
         ]
     in
     `List [ assoc; `List (List.map ~f:Json.string strs) ]
-  | Outline, outlines -> `List (json_of_outline outlines)
+  | Outline _, outlines -> `List (json_of_outline outlines)
   | Shape _, shapes -> `List (List.map ~f:json_of_shape shapes)
   | Inlay_hints _, result -> json_of_inlay_hints result
   | Errors _, errors -> `List (List.map ~f:json_of_error errors)
@@ -505,4 +535,8 @@ let json_of_response (type a) (query : a t) (response : a) : json =
            with_location ~with_file occurrence.loc
              [ ("stale", Json.bool occurrence.is_stale) ]))
   | Signature_help _, s -> json_of_signature_help s
-  | Version, version -> `String version
+  | Version, (version, magic_numbers) ->
+    `Assoc
+      [ ("version", `String version);
+        ("magicNumbers", Config.Magic_numbers.to_json magic_numbers)
+      ]

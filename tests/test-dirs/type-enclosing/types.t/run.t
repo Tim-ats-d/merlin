@@ -39,6 +39,18 @@
         "line": 5,
         "col": 11
       },
+      "type": "type x : immediate = Foo",
+      "tail": "no"
+    },
+    {
+      "start": {
+        "line": 5,
+        "col": 10
+      },
+      "end": {
+        "line": 5,
+        "col": 11
+      },
       "type": "type x = Foo",
       "tail": "no"
     },
@@ -113,7 +125,7 @@ FIXME: A type with a type param shouldn't equal itself - aliasing a list type
     }
   ]
 
-Same result regardless of verbosity:
+Shows kind with increased verbosity:
 
   $ $MERLIN single type-enclosing -short-paths -position 11:9 -verbosity 1 \
   > -filename ./types.ml < ./types.ml | jq ".value"
@@ -127,7 +139,7 @@ Same result regardless of verbosity:
         "line": 11,
         "col": 19
       },
-      "type": "type 'a l = 'a list",
+      "type": "type 'a l : immutable_data with 'a = 'a l",
       "tail": "no"
     }
   ]

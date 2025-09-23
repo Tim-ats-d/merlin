@@ -22,7 +22,7 @@
   > let z = 42
   > EOF
 
-  $ ocamlc -bin-annot -bin-annot-occurrences -c bar.ml foo.ml main.ml
+  $ $OCAMLC -bin-annot -bin-annot-occurrences -c bar.ml foo.ml main.ml
 
   $ ocaml-index aggregate -o main.uideps main.cmt
   $ ocaml-index aggregate -o foo.uideps foo.cmt
@@ -35,14 +35,14 @@
      "Foo": File "main.ml", line 11, characters 8-11
    uid: Bar.0; locs: "Bar.z": File "main.ml", line 2, characters 16-21
    uid: Foo.0; locs: "Foo.t": File "main.ml", line 3, characters 13-18
-   uid: Foo.1; locs: "Foo.x": File "main.ml", line 1, characters 8-13
-   uid: Foo.2; locs:
-     "Foo.y": File "main.ml", line 1, characters 16-21;
-     "Foo.y": File "main.ml", line 2, characters 8-13
    uid: Main.0; locs: "x": File "main.ml", line 1, characters 4-5
+   uid: Foo.1; locs: "Foo.x": File "main.ml", line 1, characters 8-13
    uid: Main.1; locs:
      "y": File "main.ml", line 2, characters 4-5;
      "y": File "main.ml", line 4, characters 28-29
+   uid: Foo.2; locs:
+     "Foo.y": File "main.ml", line 1, characters 16-21;
+     "Foo.y": File "main.ml", line 2, characters 8-13
    uid: Main.2; locs: "pouet": File "main.ml", line 3, characters 5-10
    uid: Main.3; locs: "z": File "main.ml", line 4, characters 7-8
    uid: Main.4; locs:
@@ -89,18 +89,18 @@
    uid: Foo.0; locs:
      "t": File "foo.ml", line 1, characters 5-6;
      "Foo.t": File "main.ml", line 3, characters 13-18
+   uid: Main.0; locs: "x": File "main.ml", line 1, characters 4-5
    uid: Foo.1; locs:
      "x": File "foo.ml", line 2, characters 4-5;
      "x": File "foo.ml", line 3, characters 21-22;
      "Foo.x": File "main.ml", line 1, characters 8-13
+   uid: Main.1; locs:
+     "y": File "main.ml", line 2, characters 4-5;
+     "y": File "main.ml", line 4, characters 28-29
    uid: Foo.2; locs:
      "y": File "foo.ml", line 3, characters 4-5;
      "Foo.y": File "main.ml", line 1, characters 16-21;
      "Foo.y": File "main.ml", line 2, characters 8-13
-   uid: Main.0; locs: "x": File "main.ml", line 1, characters 4-5
-   uid: Main.1; locs:
-     "y": File "main.ml", line 2, characters 4-5;
-     "y": File "main.ml", line 4, characters 28-29
    uid: Main.2; locs: "pouet": File "main.ml", line 3, characters 5-10
    uid: Main.3; locs: "z": File "main.ml", line 4, characters 7-8
    uid: Main.4; locs:
@@ -121,13 +121,6 @@
   and related uids:{}
 
   $ ocaml-index stats foo.uideps test.uideps
-  Index "test.uideps" contains:
-  - 13 definitions
-  - 29 locations
-  - 0 approximated definitions
-  - 0 compilation units shapes
-  - root dir: none
-  
   Index "foo.uideps" contains:
   - 5 definitions
   - 7 locations
@@ -135,3 +128,49 @@
   - 0 compilation units shapes
   - root dir: none
   
+  Index "test.uideps" contains:
+  - 13 definitions
+  - 29 locations
+  - 0 approximated definitions
+  - 0 compilation units shapes
+  - root dir: none
+  
+
+Jane Street Merlin uses cms files instead of cmt files. Verify that the results using
+cms files are consistent with using cmt files:
+
+  $ $OCAMLC -bin-annot-cms -bin-annot-occurrences -c bar.ml foo.ml main.ml
+
+  $ ocaml-index aggregate -o main.uideps-cms main.cms -I . -I "$MERLIN_TEST_OCAML_PATH/lib/ocaml"
+  $ ocaml-index aggregate -o foo.uideps-cms foo.cms -I . -I "$MERLIN_TEST_OCAML_PATH/lib/ocaml"
+  $ ocaml-index aggregate -o bar.uideps-cms bar.cms -I . -I "$MERLIN_TEST_OCAML_PATH/lib/ocaml"
+  $ ocaml-index -o test.uideps-cms main.cms foo.cms bar.cms -I . -I "$MERLIN_TEST_OCAML_PATH/lib/ocaml"
+
+The diff here is different. It seems this is because the cms file includes the shape for
+module _ = ..., while the cmt does not. This seems to be an insignificant difference for
+the sake of occurrences, and if anything, the cms behavior seems preferrable.
+  $ ocaml-index dump main.uideps > from-cmt.out
+  $ ocaml-index dump main.uideps-cms > from-cms.out
+  $ diff from-cmt.out from-cms.out
+  1c1
+  < 13 uids:
+  ---
+  > 14 uids:
+  24a25
+  >  uid: Main.7; locs: "": File "main.ml", line 10, characters 7-8
+  [1]
+
+  $ ocaml-index dump foo.uideps > from-cmt.out
+  $ ocaml-index dump foo.uideps-cms > from-cms.out
+  $ diff from-cmt.out from-cms.out
+
+  $ ocaml-index dump test.uideps > from-cmt.out
+  $ ocaml-index dump test.uideps-cms > from-cms.out
+  $ diff from-cmt.out from-cms.out
+  1c1
+  < 13 uids:
+  ---
+  > 14 uids:
+  33a34
+  >  uid: Main.7; locs: "": File "main.ml", line 10, characters 7-8
+  [1]

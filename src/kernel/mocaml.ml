@@ -35,7 +35,25 @@ let setup_reader_config config =
   let open Mconfig in
   let open Clflags in
   let ocaml = config.ocaml in
-  Env.set_current_unit (Mconfig.unit_info config);
+  let guessed_file_type : Unit_info.intf_or_impl =
+    (* We guess the file type based on the suffix of the file. This isn't very important
+       because we'll override the value that we use here later in Mpipeline, where we set
+       it based on the contents of the file.
+
+       At the moment, Merlin doesnt' actually use this value for anything, so it doesn't
+       matter what we set here. This is just a guard against future changes that might
+       start depending on this. *)
+    match String.split_on_char config.query.filename ~sep:'.' |> List.last with
+    | Some "ml" -> Impl
+    | Some "mli" -> Intf
+    | _ -> Impl
+  in
+  let compilation_unit = Compilation_unit.of_string (Mconfig.unitname config) in
+  let unit_info =
+    Unit_info.make_with_known_compilation_unit
+      ~source_file:config.query.filename guessed_file_type "" compilation_unit
+  in
+  Env.set_unit_name (Some unit_info);
   Location.input_name := config.query.filename;
   fast := ocaml.unsafe;
   classic := ocaml.classic;
@@ -46,13 +64,21 @@ let setup_reader_config config =
   applicative_functors := ocaml.applicative_functors;
   nopervasives := ocaml.nopervasives;
   strict_formats := ocaml.strict_formats;
-  open_modules := ocaml.open_modules
+  open_modules := ocaml.open_modules;
+  cmi_file := ocaml.cmi_file;
+  as_parameter := ocaml.as_parameter;
+  zero_alloc_check := ocaml.zero_alloc_check
+
+let init_params params =
+  List.iter params ~f:(fun s ->
+      Env.register_parameter (s |> Global_module.Parameter_name.of_string))
 
 let setup_typer_config config =
   setup_reader_config config;
   let visible = Mconfig.build_path config in
   let hidden = Mconfig.hidden_build_path config in
-  Load_path.(init ~auto_include:no_auto_include ~visible ~hidden)
+  Load_path.(init ~auto_include:no_auto_include ~visible ~hidden);
+  init_params config.ocaml.parameters
 
 (** Switchable implementation of Oprint *)
 

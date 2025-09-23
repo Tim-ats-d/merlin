@@ -31,8 +31,12 @@ type t =
     (* We attach the constructor description here so in the case of
        disambiguated constructors we actually directly look for the type
        path (cf. #486, #794). *)
+  | Unknown_constructor
   | Expr
-  | Label of Types.label_description (* Similar to constructors. *)
+  | Label :
+      'rep Types.gen_label_description * 'rep Types.record_form
+      -> t (* Similar to constructors. *)
+  | Unknown_label
   | Module_path
   | Module_type
   | Patt
@@ -41,6 +45,8 @@ type t =
   | Unknown
 
 val to_string : t -> string
+
+val of_locate_context : Query_protocol.Locate_context.t -> t
 
 (**
   [inspect_browse_tree lid ~cursor mbrowse] tries to provide contextual
@@ -55,4 +61,8 @@ val to_string : t -> string
   breaking the context inference.
 *)
 val inspect_browse_tree :
-  cursor:Std.Lexing.position -> Longident.t -> Mbrowse.t list -> t option
+  ?let_pun_behavior:Mbrowse.Let_pun_behavior.t ->
+  cursor:Std.Lexing.position ->
+  Longident.t ->
+  Mbrowse.t list ->
+  t option

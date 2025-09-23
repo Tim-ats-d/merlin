@@ -24,9 +24,6 @@ module Path : sig
   val is_opened : Env.t -> Path.t -> bool
 end
 
-(* Add parenthesis to qualified operators *)
-val parenthesize_name : string -> string
-
 (** [parse_identifier] attempts to re-parse a longident so that we get
     the location of each of its components. *)
 val parse_identifier :
@@ -39,3 +36,9 @@ val reconstruct_identifier :
   Lexing.position ->
   (string * int) option ->
   string Location.loc list
+
+(* Add parenthesis to qualified operators *)
+val parenthesize_name : string -> string
+
+(* [is_current_unit cu] returns true if [cu] is the current compilation unit *)
+val is_current_unit : string -> bool

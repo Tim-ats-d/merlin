@@ -28,21 +28,30 @@ module Signature_names : sig
   val simplify: Env.t -> t -> signature -> signature
 end
 
+(* In the following, the optional [expected_mode] is for better error messages
+and not strictly enforced. The caller is reponsible to enforce mode constraint
+by inspecting the returned mode. *)
+(* CR zqian: Remove [?expected_mode] once we have mode error chain. *)
+
 val type_module:
-        Env.t -> Parsetree.module_expr -> Typedtree.module_expr * Shape.t
+        Env.t -> ?expected_mode:Mode.Value.r -> Parsetree.module_expr ->
+        Typedtree.module_expr * Shape.t
 val type_structure:
-  Env.t -> Parsetree.structure ->
-  Typedtree.structure * Types.signature * Signature_names.t * Shape.t *
-  Env.t
+  Env.t -> ?expected_mode:Mode.Value.r -> Parsetree.structure ->
+  Typedtree.structure * Types.signature * Mode.Value.lr * Signature_names.t *
+  Shape.t * Env.t
 val type_toplevel_phrase:
-  Env.t -> Parsetree.structure ->
+  Env.t -> Types.signature -> Parsetree.structure ->
   Typedtree.structure * Types.signature * (* Signature_names.t * *) Shape.t *
   Env.t
 val type_implementation:
-  Unit_info.t -> Env.t -> Parsetree.structure ->
-  Typedtree.implementation
+  Unit_info.t -> Compilation_unit.t -> Env.t ->
+  Parsetree.structure -> Typedtree.implementation
 val type_interface:
-        Env.t -> Parsetree.signature -> Typedtree.signature
+  sourcefile:string -> Compilation_unit.t -> Env.t ->
+  Parsetree.signature -> Typedtree.signature
+val transl_signature:
+  Env.t -> Parsetree.signature -> Typedtree.signature
 val check_nongen_signature:
         Env.t -> Types.signature -> unit
         (*
@@ -58,11 +67,12 @@ val modtype_of_package:
 val path_of_module : Typedtree.module_expr -> Path.t option
 
 val save_signature:
-  Unit_info.t -> Typedtree.signature -> Env.t ->
-  Cmi_format.cmi_infos -> unit
+  Unit_info.t -> Compilation_unit.t -> Typedtree.signature ->
+  Env.t -> Cmi_format.cmi_infos_lazy -> unit
 
 val package_units:
-  Env.t -> string list -> Unit_info.Artifact.t -> Typedtree.module_coercion
+  Env.t -> string list -> Unit_info.Artifact.t -> Compilation_unit.t
+  -> Typedtree.module_coercion
 
 (* Should be in Envaux, but it breaks the build of the debugger *)
 val initial_env:
@@ -76,6 +86,7 @@ module Sig_component_kind : sig
     | Type
     | Constructor
     | Label
+    | Unboxed_label
     | Module
     | Module_type
     | Extension_constructor
@@ -103,12 +114,32 @@ type hiding_error =
       user_loc: Location.t;
     }
 
+type functor_dependency_error =
+    Functor_applied
+  | Functor_included
+
+(** Modules that are required to be legacy mode *)
+type legacy_module =
+  | Compilation_unit
+  | Toplevel
+  | Functor_body
+
+(** Places where modes annotations are not supported *)
+type unsupported_modal_module =
+  | Functor_param
+  | Functor_res
+
 type error =
     Cannot_apply of module_type
   | Not_included of Includemod.explanation
-  | Cannot_eliminate_dependency of module_type
+  | Not_included_functor of Includemod.explanation
+  | Cannot_eliminate_dependency of functor_dependency_error * module_type
   | Signature_expected
   | Structure_expected of module_type
+  | Functor_expected of module_type
+  | Signature_parameter_expected of module_type
+  | Signature_result_expected of module_type
+  | Recursive_include_functor
   | With_no_component of Longident.t
   | With_mismatch of Longident.t * Includemod.explanation
   | With_makes_applicative_functor_ill_typed of
@@ -123,6 +154,7 @@ type error =
   | Implementation_is_required of string
   | Interface_not_compiled of string
   | Not_allowed_in_functor_body
+  | Not_includable_in_functor_body
   | Not_a_packed_module of type_expr
   | Incomplete_packed_module of type_expr
   | Scoping_pack of Longident.t * type_expr
@@ -135,20 +167,42 @@ type error =
   | Invalid_type_subst_rhs
   | Non_packable_local_modtype_subst of Path.t
   | With_cannot_remove_packed_modtype of Path.t * module_type
-  | Cannot_alias of Path.t
+  | Toplevel_nonvalue of string * Jkind.sort
+  | Toplevel_unnamed_nonvalue of Jkind.sort
+  | Strengthening_mismatch of Longident.t * Includemod.explanation
+  | Cannot_pack_parameter
+  | Compiling_as_parameterised_parameter
+  | Cannot_compile_implementation_as_parameter
+  | Cannot_implement_parameter of Compilation_unit.Name.t * Misc.filepath
+  | Argument_for_non_parameter of Global_module.Name.t * Misc.filepath
+  | Cannot_find_argument_type of Global_module.Parameter_name.t
+  | Inconsistent_argument_types of {
+      new_arg_type: Global_module.Parameter_name.t option;
+      old_arg_type: Global_module.Parameter_name.t option;
+      old_source_file: Misc.filepath;
+    }
+  | Duplicate_parameter_name of Global_module.Parameter_name.t
+  | Submode_failed of Mode.Value.error
+  | Item_weaker_than_structure of Mode.Value.error
+  | Unsupported_modal_module of unsupported_modal_module
+  | Legacy_module of legacy_module * Mode.Value.error
 
 exception Error of Location.t * Env.t * error
 exception Error_forward of Location.error
 
 val report_error: Env.t -> loc:Location.t -> error -> Location.error
 
+(** Clear several bits of global state that may retain large amounts of memory
+    after typechecking is finished. *)
+val reset : preserve_persistent_env:bool -> unit
+
 (* merlin *)
 
 val normalize_signature : Types.signature -> unit
 
 val merlin_type_structure:
-  Env.t -> Parsetree.structure ->
+  Env.t -> Types.signature -> Parsetree.structure ->
   Typedtree.structure * Types.signature * (* Signature_names.t * *) Env.t
 
 val merlin_transl_signature:
-  Env.t -> Parsetree.signature -> Typedtree.signature
+  Env.t -> Types.signature -> Parsetree.signature -> Typedtree.signature

@@ -109,12 +109,17 @@ module List = struct
       | None -> filter_map ~f xs
       | Some x -> x :: filter_map ~f xs)
 
-  let rec find_map ~f = function
-    | [] -> raise Not_found
+  let rec find_map_opt ~f = function
+    | [] -> None
     | x :: xs -> (
       match f x with
-      | None -> find_map ~f xs
-      | Some x' -> x')
+      | None -> find_map_opt ~f xs
+      | Some x' -> Some x')
+
+  let find_map ~f l =
+    match find_map_opt ~f l with
+    | None -> raise Not_found
+    | Some x -> x
 
   let rec map_end ~f l1 l2 =
     match l1 with
@@ -339,6 +344,8 @@ module Option = struct
     let return x = Some x
     let ( >>= ) x f = bind x ~f
     let ( >>| ) x f = map x ~f
+    let ( let* ) opt f = bind opt ~f
+    let ( let+ ) opt f = map opt ~f
   end
 
   include Infix
@@ -666,10 +673,6 @@ module Lexing = struct
 end
 
 module Char = struct
-  (* FIXME: Remove once we drop support for 4.02 and replace the calls to
-     [uppercase] and [lowercase] by their [_ascii] version. *)
-  [@@@ocaml.warning "-3"]
-
   include Char
   let is_lowercase c = lowercase_ascii c = c
   let is_uppercase c = uppercase_ascii c = c

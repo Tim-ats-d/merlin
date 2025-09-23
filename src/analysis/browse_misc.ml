@@ -38,10 +38,13 @@ let print_constructor c =
     Out_type.tree_of_typexp Type_scheme
       (dummy_type_scheme (get_desc c.cstr_res))
   | args ->
+    let labeled_args_without_modalities =
+      List.map ~f:(fun arg -> (None, arg.ca_type)) args
+    in
     let desc =
       Tarrow
-        ( Ast_helper.no_label,
-          dummy_type_scheme (Ttuple args),
+        ( (Nolabel, Mode.Alloc.legacy, Mode.Alloc.legacy),
+          dummy_type_scheme (Ttuple labeled_args_without_modalities),
           c.cstr_res,
           commu_ok )
     in
@@ -50,10 +53,10 @@ let print_constructor c =
 let summary_prev = function
   | Env.Env_empty -> None
   | Env.Env_open (s, _)
-  | Env.Env_value (s, _, _)
+  | Env.Env_value (s, _, _, _)
   | Env.Env_type (s, _, _)
   | Env.Env_extension (s, _, _)
-  | Env.Env_module (s, _, _, _)
+  | Env.Env_module (s, _, _, _, _, _)
   | Env.Env_modtype (s, _, _)
   | Env.Env_class (s, _, _)
   | Env.Env_cltype (s, _, _)
@@ -71,7 +74,7 @@ let signature_of_env ?(ignore_extensions = true) env =
     (* FIXME: the use of [Exported] here is wrong... The compiler should export
        that information. *)
     function
-    | Env_value (_, i, v) -> Some (Sig_value (i, v, Exported))
+    | Env_value (_, i, v, _) -> Some (Sig_value (i, v, Exported))
     (* Trec_not == bluff, FIXME *)
     | Env_type (_, i, t) -> Some (Sig_type (i, t, Trec_not, Exported))
     (* Texp_first == bluff, FIXME *)
@@ -81,7 +84,7 @@ let signature_of_env ?(ignore_extensions = true) env =
         Some (Sig_typext (i, e, Text_exception, Exported))
       | _ -> Some (Sig_typext (i, e, Text_first, Exported))
     end
-    | Env_module (_, i, pr, m) ->
+    | Env_module (_, i, pr, m, _, _) ->
       Some (Sig_module (i, pr, m, Trec_not, Exported))
     | Env_modtype (_, i, m) -> Some (Sig_modtype (i, m, Exported))
     | Env_class (_, i, c) -> Some (Sig_class (i, c, Trec_not, Exported))
@@ -96,7 +99,7 @@ let signature_of_env ?(ignore_extensions = true) env =
     | Env_module_unbound _ -> None
   in
   let summary_module_ident_opt = function
-    | Env.Env_module (_, i, _, _) -> Some i
+    | Env.Env_module (_, i, _, _, _, _) -> Some i
     | _ -> None
   in
   let sg = ref [] in

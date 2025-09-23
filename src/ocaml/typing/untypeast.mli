@@ -82,7 +82,7 @@ val default_mapper : mapper
 val untype_structure : ?mapper:mapper -> Typedtree.structure -> structure
 val untype_signature : ?mapper:mapper -> Typedtree.signature -> signature
 
-val constant : Asttypes.constant -> Parsetree.constant
+val constant : Typedtree.constant -> Parsetree.constant
 
 (* Merlin *)
 val untype_pattern : _ Typedtree.general_pattern -> Parsetree.pattern

@@ -113,14 +113,15 @@ module Printtyp = struct
     | Some m -> { ty with Types.type_manifest = Some (expand_type env m) }
     | None -> ty
 
-  let expand_sig env mty = Env.with_cmis @@ fun () -> Env.scrape_alias env mty
+  let expand_sig env mty = Env.with_cmis @@ fun () -> Mtype.scrape_alias env mty
 
   let verbose_type_scheme env ppf t =
-    let t = expand_type env t in
-    Printtyp.type_scheme ppf t
+    Printtyp.type_scheme_for_merlin ppf (expand_type env t)
+      ~print_non_value_jkind_on_type_variables:true
 
-  let verbose_type_declaration env id ppf t =
-    Printtyp.type_declaration id ppf (expand_type_decl env t)
+  let verbose_type_declaration ~print_non_value_inferred_jkind env id ppf t =
+    Printtyp.type_declaration_for_merlin id ppf (expand_type_decl env t)
+      ~print_non_value_inferred_jkind
 
   let verbose_modtype env ppf t = Printtyp.modtype ppf (expand_sig env t)
 
@@ -131,7 +132,10 @@ module Printtyp = struct
     | Lvl _ -> verbose
 
   let type_scheme env ppf ty =
-    (select_by_verbosity ~default:type_scheme ~verbose:(verbose_type_scheme env))
+    (select_by_verbosity
+       ~default:
+         (type_scheme_for_merlin ~print_non_value_jkind_on_type_variables:false)
+       ~verbose:(verbose_type_scheme env))
       ppf ty
 
   let tree_of_typ_scheme te =
@@ -139,8 +143,11 @@ module Printtyp = struct
     Out_type.tree_of_typexp Type_scheme te
 
   let type_declaration env id ppf =
-    (select_by_verbosity ~default:type_declaration
-       ~verbose:(verbose_type_declaration env))
+    (select_by_verbosity
+       ~default:
+         (type_declaration_for_merlin ~print_non_value_inferred_jkind:false)
+       ~verbose:
+         (verbose_type_declaration ~print_non_value_inferred_jkind:true env))
       id ppf
 
   let modtype env ppf mty =
@@ -218,11 +225,7 @@ let print_type_with_decl ~verbosity env ppf typ =
     match Types.get_desc typ with
     | Types.Tconstr (path, params, _) ->
       let decl = Env.with_cmis @@ fun () -> Env.find_type path env in
-      let is_abstract =
-        match decl.Types.type_kind with
-        | Types.Type_abstract _ -> true
-        | _ -> false
-      in
+      let is_abstract = Btype.type_kind_is_abstract decl in
       (* Print expression only if it is parameterized or abstract *)
       let print_expr = is_abstract || params <> [] in
       if print_expr then Printtyp.type_scheme env ppf typ;
@@ -240,7 +243,8 @@ let print_type_with_decl ~verbosity env ppf typ =
           | Path.Pdot _ | Path.Pextra_ty _ ->
             Ident.create_persistent (Path.last path)
         in
-        Printtyp.type_declaration env ident ppf decl
+        Printtyp.verbose_type_declaration env ident ppf decl
+          ~print_non_value_inferred_jkind:false
       end
     | _ -> Printtyp.type_scheme env ppf typ
   end
@@ -251,15 +255,16 @@ let print_exn ppf exn =
     Format.pp_print_string ppf (Printexc.to_string exn)
   | Some (`Ok report) -> Location.print_main ppf report
 
-let print_type ppf env lid =
+let print_type ppf verbosity env lid =
   let p, t = Env.find_type_by_name lid.Asttypes.txt env in
-  match t.type_manifest with
-  | None ->
-    Printtyp.type_declaration env
-      (Ident.create_persistent
-         (* Incorrect, but doesn't matter. *) (Path.last p))
-      ppf t
-  | Some type_expr -> Printtyp.type_expr ppf type_expr
+  Printtyp.wrap_printing_env env ~verbosity
+    begin
+      fun () ->
+        Printtyp.type_declaration env
+          (Ident.create_persistent (* Incorrect, but doesn't matter. *)
+             (Path.last p))
+          ppf t
+    end
 
 let print_modtype ppf verbosity env lid =
   let _p, mtd = Env.find_modtype_by_name lid.Asttypes.txt env in
@@ -285,11 +290,16 @@ let type_in_env ?(verbosity = Verbosity.default) ?keywords ~context env ppf expr
   let print_expr expression =
     let str, _sg, _shape, _ =
       Env.with_cmis @@ fun () ->
-      Typemod.type_toplevel_phrase env [ Ast_helper.Str.eval expression ]
+      Typemod.type_toplevel_phrase env []
+        (* This parameter is the list of toplevel definitions that are
+           available to [include functor].  It seems that this is handled
+           safely by Merlin as it stands, so we don't need to add anything
+           here. *)
+        [ Ast_helper.Str.eval expression ]
     in
     let open Typedtree in
     match str.str_items with
-    | [ { str_desc = Tstr_eval (exp, _); _ } ] ->
+    | [ { str_desc = Tstr_eval (exp, _, _); _ } ] ->
       print_type_with_decl ~verbosity env ppf exp.exp_type
     | _ -> failwith "unhandled expression"
   in
@@ -312,13 +322,11 @@ let type_in_env ?(verbosity = Verbosity.default) ?keywords ~context env ppf expr
       try
         begin
           match context with
-          | Label lbl_des ->
+          | Label (lbl_des, _) ->
             (* We use information from the context because `Env.find_label_by_name`
                can fail *)
             Printtyp.type_expr ppf lbl_des.lbl_arg
-          | Type ->
-            log ~title:"type_in_env" "Type type";
-            print_type ppf env longident
+          | Type -> print_type ppf verbosity env longident
           (* TODO: special processing for module aliases ? *)
           | Module_type -> print_modtype ppf verbosity env longident
           | Module_path -> print_modpath ppf verbosity env longident
@@ -327,7 +335,7 @@ let type_in_env ?(verbosity = Verbosity.default) ?keywords ~context env ppf expr
         end;
         true
       with _ -> (
-        (* Fallback to contextless typing attempts *)
+        (* Fallback to contextless typing attemps *)
         try
           print_expr e;
           true

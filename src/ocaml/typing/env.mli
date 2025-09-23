@@ -25,14 +25,20 @@ type value_unbound_reason =
   | Val_unbound_ghost_recursive of Location.t
 
 type module_unbound_reason =
-  | Mod_unbound_illegal_recursion
+  | Mod_unbound_illegal_recursion of
+      { container : string option; unbound: string }
+
+type locks
 
 type summary =
     Env_empty
-  | Env_value of summary * Ident.t * value_description
+  | Env_value of summary * Ident.t * value_description * Mode.Value.l
   | Env_type of summary * Ident.t * type_declaration
   | Env_extension of summary * Ident.t * extension_constructor
-  | Env_module of summary * Ident.t * module_presence * module_declaration
+  | Env_module of summary * Ident.t * module_presence * module_declaration *
+      Mode.Value.l * locks
+  (* CR zqian: change to [locks option], so for module aliases it could be
+  [Some []]. *)
   | Env_modtype of summary * Ident.t * modtype_declaration
   | Env_class of summary * Ident.t * class_declaration
   | Env_cltype of summary * Ident.t * class_type_declaration
@@ -45,22 +51,28 @@ type summary =
   | Env_persistent of summary * Ident.t
   | Env_value_unbound of summary * string * value_unbound_reason
   | Env_module_unbound of summary * string * module_unbound_reason
+  (* CR zqian: track [add_lock] as well *)
 
-type address =
-  | Aident of Ident.t
+type address = Persistent_env.address =
+  | Aunit of Compilation_unit.t
+  | Alocal of Ident.t
   | Adot of address * int
 
 type t
 
 val empty: t
-val initial: t
+(* This environment is lazy so that it may depend on the enabled extensions,
+   typically adjusted via command line flags.  If extensions are changed after
+   theis environment is forced, they may be inaccurate.  This could happen, for
+   example, if extensions are adjusted via the compiler-libs. *)
+val initial: t Lazy.t
 val diff: t -> t -> Ident.t list
 
 (* approximation to the preimage equivalence class of [find_type] *)
 val same_type_declarations: t -> t -> bool
 
 type type_descr_kind =
-  (label_description, constructor_description) type_kind
+  (label_description, unboxed_label_description, constructor_description) type_kind
 
   (* alias for compatibility *)
 type type_descriptions = type_descr_kind
@@ -72,7 +84,7 @@ val iter_types:
     t -> iter_cont
 val run_iter_cont: iter_cont list -> (Path.t * iter_cont) list
 val same_types: t -> t -> bool
-val used_persistent: unit -> String.Set.t
+val used_persistent: unit -> Compilation_unit.Name.Set.t
 val find_shadowed_types: Path.t -> t -> Path.t list
 val without_cmis: ('a -> 'b) -> 'a -> 'b
 (* [without_cmis f arg] applies [f] to [arg], but does not
@@ -80,19 +92,22 @@ val without_cmis: ('a -> 'b) -> 'a -> 'b
 
 (* Lookup by paths *)
 
-val find_value: Path.t -> t -> value_description
+val find_value_no_locks_exn: Ident.t -> t ->
+  Subst.Lazy.value_description * Mode.Value.l
+(** Find a value by an [Ident.t]. Raises if encounters any locks. *)
+
+val find_value: Path.t -> t -> Subst.Lazy.value_description
 val find_type: Path.t -> t -> type_declaration
 val find_type_descrs: Path.t -> t -> type_descriptions
+val find_module_lazy: Path.t -> t -> Subst.Lazy.module_declaration
 val find_module: Path.t -> t -> module_declaration
+val find_modtype_lazy: Path.t -> t -> Subst.Lazy.modtype_declaration
 val find_modtype: Path.t -> t -> modtype_declaration
 val find_class: Path.t -> t -> class_declaration
 val find_cltype: Path.t -> t -> class_type_declaration
 
-val find_strengthened_module:
-  aliasable:bool -> Path.t -> t -> module_type
-
 val find_ident_constructor: Ident.t -> t -> constructor_description
-val find_ident_label: Ident.t -> t -> label_description
+val find_ident_label: 'rcd record_form -> Ident.t -> t -> 'rcd gen_label_description
 
 val find_type_expansion:
     Path.t -> t -> type_expr list * type_expr * int
@@ -101,7 +116,7 @@ val find_type_expansion_opt:
 (* Find the manifest type information associated to a type for the sake
    of the compiler's type-based optimisations. *)
 val find_modtype_expansion: Path.t -> t -> module_type
-val find_modtype_expansion_lazy: Path.t -> t -> Subst.Lazy.modtype
+val find_modtype_expansion_lazy: Path.t -> t -> Subst.Lazy.module_type
 
 val find_hash_type: Path.t -> t -> type_declaration
 (* Find the "#t" type given the path for "t" *)
@@ -113,6 +128,11 @@ val find_constructor_address: Path.t -> t -> address
 
 val shape_of_path:
   namespace:Shape.Sig_component_kind.t -> t -> Path.t -> Shape.t
+
+val shape_of_path_opt:
+  namespace:Shape.Sig_component_kind.t -> t -> Path.t -> Shape.t option
+
+val shape_for_constr: t -> Path.t -> args:Shape.t list -> Shape.t option
 
 val add_functor_arg: Ident.t -> t -> t
 val is_functor_arg: Path.t -> t -> bool
@@ -132,9 +152,17 @@ val normalize_value_path: Location.t option -> t -> Path.t -> Path.t
 val normalize_modtype_path: t -> Path.t -> Path.t
 (* Normalize a module type path *)
 
+val normalize_instance_names_in_module_path: Path.t -> Path.t
+(* Normalize the instance names appearing in a module path by removing
+   excess arguments arising from transparent aliases *)
+
 val reset_required_globals: unit -> unit
-val get_required_globals: unit -> Ident.t list
-val add_required_global: Ident.t -> unit
+val get_required_globals: unit -> Compilation_unit.t list
+val add_required_global: Path.t -> t -> unit
+
+val reset_probes: unit -> unit
+val add_probe: string -> unit
+val has_probe: string -> bool
 
 val has_local_constraints: t -> bool
 
@@ -143,16 +171,19 @@ val mark_value_used: Uid.t -> unit
 val mark_module_used: Uid.t -> unit
 val mark_type_used: Uid.t -> unit
 
+(* Mark mutable variable as mutated *)
+val mark_value_mutated: Uid.t -> unit
+
 type constructor_usage = Positive | Pattern | Exported_private | Exported
 val mark_constructor_used:
-    constructor_usage -> constructor_declaration -> unit
+    constructor_usage -> Uid.t -> unit
 val mark_extension_used:
-    constructor_usage -> extension_constructor -> unit
+    constructor_usage -> Uid.t -> unit
 
 type label_usage =
     Projection | Mutation | Construct | Exported_private | Exported
 val mark_label_used:
-    label_usage -> label_declaration -> unit
+    label_usage -> Uid.t -> unit
 
 (* Lookup by long identifiers *)
 
@@ -162,27 +193,73 @@ type unbound_value_hint =
   | No_hint
   | Missing_rec of Location.t
 
+type escaping_context =
+  | Letop
+  | Probe
+  | Class
+
+type shared_context =
+  | For_loop
+  | While_loop
+  | Letop
+  | Comprehension
+  | Class
+  | Probe
+
+type mode_with_locks = Mode.Value.l * locks
+(** Sometimes we get the locks for something, but either want to walk them later, or
+walk them for something else. The [Longident.t] and [Location.t] are only for error
+messages, and point to the variable for which we actually want to walk the locks. *)
+
+val locks_empty : locks
+
+val locks_is_empty : locks -> bool
+
+val mode_unit : Mode.Value.lr
+
+type structure_components_reason =
+  | Project
+  | Open
+
 type lookup_error =
   | Unbound_value of Longident.t * unbound_value_hint
   | Unbound_type of Longident.t
   | Unbound_constructor of Longident.t
-  | Unbound_label of Longident.t
+  | Unbound_label of Longident.t * record_form_packed * label_usage
   | Unbound_module of Longident.t
   | Unbound_class of Longident.t
   | Unbound_modtype of Longident.t
   | Unbound_cltype of Longident.t
-  | Unbound_instance_variable of string
-  | Not_an_instance_variable of string
+  | Unbound_settable_variable of string
+  | Not_a_settable_variable of string
   | Masked_instance_variable of Longident.t
   | Masked_self_variable of Longident.t
   | Masked_ancestor_variable of Longident.t
   | Structure_used_as_functor of Longident.t
-  | Abstract_used_as_functor of Longident.t
-  | Functor_used_as_structure of Longident.t
-  | Abstract_used_as_structure of Longident.t
+  | Abstract_used_as_functor of Longident.t * Path.t
+  | Functor_used_as_structure of Longident.t * structure_components_reason
+  | Abstract_used_as_structure of Longident.t * Path.t * structure_components_reason
   | Generative_used_as_applicative of Longident.t
-  | Illegal_reference_to_recursive_module
+  | Illegal_reference_to_recursive_module of
+      { container : string option; unbound : string }
+  | Illegal_reference_to_recursive_class_type of
+      { container : string option;
+        unbound : string;
+        unbound_class_type : Longident.t;
+        container_class_type : string
+      }
   | Cannot_scrape_alias of Longident.t * Path.t
+  | Local_value_escaping of Mode.Hint.lock_item * Longident.t * escaping_context
+  | Once_value_used_in of Mode.Hint.lock_item * Longident.t * shared_context
+  | Value_used_in_closure of Mode.Hint.lock_item * Longident.t *
+      Mode.Value.Comonadic.error
+  | Local_value_used_in_exclave of Mode.Hint.lock_item * Longident.t
+  | Non_value_used_in_object of Longident.t * type_expr * Jkind.Violation.t
+  | No_unboxed_version of Longident.t * type_declaration
+  | Error_from_persistent_env of Persistent_env.error
+  | Mutable_value_used_in_closure of
+      [`Escape of escaping_context | `Shared of shared_context | `Closure]
+
 
 val lookup_error: Location.t -> t -> lookup_error -> 'a
 
@@ -198,55 +275,80 @@ val lookup_error: Location.t -> t -> lookup_error -> 'a
    [lookup_foo ~use:true] exactly one time -- otherwise warnings may be
    emitted the wrong number of times. *)
 
+type actual_mode = {
+  mode : Mode.Value.l;
+  context : shared_context option
+  (** Explains why [mode] is high. *)
+}
+
+(** Takes the mode and the type of a value at definition site, walks through the
+    list of locks and constrains the mode and the type. Return the access mode
+    of the value allowed by the locks. [ty] is optional as the function works on
+    modules and classes as well, for which [ty] should be [None]. *)
+val walk_locks : env:t -> loc:Location.t -> Longident.t ->
+  item:Mode.Hint.lock_item ->
+  type_expr option -> mode_with_locks -> actual_mode
+
 val lookup_value:
   ?use:bool -> loc:Location.t -> Longident.t -> t ->
-  Path.t * value_description
+  Path.t * value_description * mode_with_locks
 val lookup_type:
   ?use:bool -> loc:Location.t -> Longident.t -> t ->
   Path.t * type_declaration
 val lookup_module:
   ?use:bool -> loc:Location.t -> Longident.t -> t ->
-  Path.t * module_declaration
+  Path.t * module_declaration * mode_with_locks
 val lookup_modtype:
   ?use:bool -> loc:Location.t -> Longident.t -> t ->
   Path.t * modtype_declaration
 val lookup_class:
   ?use:bool -> loc:Location.t -> Longident.t -> t ->
-  Path.t * class_declaration
+  Path.t * class_declaration * Mode.Value.l
 val lookup_cltype:
   ?use:bool -> loc:Location.t -> Longident.t -> t ->
   Path.t * class_type_declaration
 
+(* When locks are returned instead of walked for modules, the mode remains as
+  defined (always legacy), and thus not returned. *)
 val lookup_module_path:
-  ?use:bool -> loc:Location.t -> load:bool -> Longident.t -> t -> Path.t
+  ?use:bool -> loc:Location.t -> load:bool -> Longident.t -> t ->
+    Path.t * mode_with_locks
 val lookup_modtype_path:
   ?use:bool -> loc:Location.t -> Longident.t -> t -> Path.t
+val lookup_module_instance_path:
+  ?use:bool -> loc:Location.t -> load:bool -> Global_module.Name.t -> t ->
+    Path.t * locks
 
 val lookup_constructor:
   ?use:bool -> loc:Location.t -> constructor_usage -> Longident.t -> t ->
-  constructor_description
+  constructor_description * locks
 val lookup_all_constructors:
   ?use:bool -> loc:Location.t -> constructor_usage -> Longident.t -> t ->
-  ((constructor_description * (unit -> unit)) list,
+  (((constructor_description * locks) * (unit -> unit)) list,
    Location.t * t * lookup_error) result
 val lookup_all_constructors_from_type:
   ?use:bool -> loc:Location.t -> constructor_usage -> Path.t -> t ->
-  (constructor_description * (unit -> unit)) list
+  ((constructor_description * locks) * (unit -> unit)) list
 
 val lookup_label:
-  ?use:bool -> loc:Location.t -> label_usage -> Longident.t -> t ->
-  label_description
+  ?use:bool -> record_form:'rcd record_form -> loc:Location.t -> label_usage -> Longident.t -> t ->
+  'rcd gen_label_description
 val lookup_all_labels:
-  ?use:bool -> loc:Location.t -> label_usage -> Longident.t -> t ->
-  ((label_description * (unit -> unit)) list,
+  ?use:bool -> record_form:'rcd record_form -> loc:Location.t -> label_usage -> Longident.t -> t ->
+  (('rcd gen_label_description * (unit -> unit)) list,
    Location.t * t * lookup_error) result
 val lookup_all_labels_from_type:
-  ?use:bool -> loc:Location.t -> label_usage -> Path.t -> t ->
-  (label_description * (unit -> unit)) list
+  ?use:bool -> record_form:'rcd record_form -> loc:Location.t -> label_usage -> Path.t -> t ->
+  ('rcd gen_label_description * (unit -> unit)) list
 
-val lookup_instance_variable:
-  ?use:bool -> loc:Location.t -> string -> t ->
-  Path.t * Asttypes.mutable_flag * string * type_expr
+type settable_variable =
+  | Instance_variable of Path.t * Asttypes.mutable_flag * string * type_expr
+  | Mutable_variable of Ident.t * Mode.Value.r * type_expr * Jkind.Sort.t
+
+(** For a mutable variable, [use] means mark as mutated. For an instance
+    variable, it means mark as used. *)
+val lookup_settable_variable:
+  ?use:bool -> loc:Location.t -> string -> t -> settable_variable
 
 val find_value_by_name:
   Longident.t -> t -> Path.t * value_description
@@ -264,7 +366,7 @@ val find_cltype_by_name:
 val find_constructor_by_name:
   Longident.t -> t -> constructor_description
 val find_label_by_name:
-  Longident.t -> t -> label_description
+  'rep record_form -> Longident.t -> t -> 'rep gen_label_description
 
 (** The [find_*_index] functions computes a "namespaced" De Bruijn index
     of an identifier in a given environment. In other words, it returns how many
@@ -292,25 +394,39 @@ val bound_cltype: string -> t -> bool
 
 val make_copy_of_types: t -> (t -> t)
 
+(* Resolution of globals *)
+
+(* [global_of_instance_compilation_unit cu] checks that a compilation unit is a
+   complete instantiation - that is, that all of its parameters are filled by
+   arguments, and all of those arguments' parameters are filled, and so on -
+   and converts it into a global. *)
+val global_of_instance_compilation_unit : Compilation_unit.t -> Global_module.t
+
 (* Insertion by identifier *)
 
+val add_value_lazy:
+    ?check:(string -> Warnings.t) -> mode:(Mode.allowed * 'r) Mode.Value.t ->
+    Ident.t -> Subst.Lazy.value_description -> t -> t
 val add_value:
-    ?check:(string -> Warnings.t) -> Ident.t -> value_description -> t -> t
-val add_type:
-  check:bool -> ?shape:Shape.t -> Ident.t -> type_declaration -> t -> t
-val add_type_long_path:
-  check:bool -> ?shape:Shape.t -> Ident.t -> type_declaration -> t -> t
+    ?check:(string -> Warnings.t) -> mode:(Mode.allowed * 'r) Mode.Value.t ->
+    Ident.t -> value_description -> t -> t
+val add_type: check:bool -> ?shape:Shape.t -> Ident.t -> type_declaration -> t -> t
+val add_type_long_path: check:bool -> ?shape:Shape.t -> Ident.t -> type_declaration -> t -> t
 val add_extension:
   check:bool -> ?shape:Shape.t -> rebind:bool -> Ident.t ->
   extension_constructor -> t -> t
+(* Modules can be added without modes, which defaults to the max mode *)
 val add_module: ?arg:bool -> ?shape:Shape.t ->
-  Ident.t -> module_presence -> module_type -> t -> t
+  Ident.t -> module_presence -> module_type -> ?mode:Mode.Value.l -> t -> t
 val add_module_lazy: update_summary:bool ->
-  Ident.t -> module_presence -> Subst.Lazy.modtype -> t -> t
+  Ident.t -> module_presence -> Subst.Lazy.module_type -> ?mode:Mode.Value.l ->
+  t -> t
 val add_module_declaration: ?arg:bool -> ?shape:Shape.t -> check:bool ->
-  Ident.t -> module_presence -> module_declaration -> t -> t
-val add_module_declaration_lazy: update_summary:bool ->
-  Ident.t -> module_presence -> Subst.Lazy.module_decl -> t -> t
+  Ident.t -> module_presence -> module_declaration ->
+  ?mode:(Mode.allowed * 'r) Mode.Value.t -> ?locks:locks -> t -> t
+val add_module_declaration_lazy: ?arg:bool -> update_summary:bool ->
+  Ident.t -> module_presence -> Subst.Lazy.module_declaration ->
+  ?mode:(Mode.allowed * 'r) Mode.Value.t -> ?locks:locks -> t -> t
 val add_modtype: Ident.t -> modtype_declaration -> t -> t
 val add_modtype_lazy: update_summary:bool ->
    Ident.t -> Subst.Lazy.modtype_declaration -> t -> t
@@ -340,24 +456,27 @@ val filter_non_loaded_persistent : (Ident.t -> bool) -> t -> t
 (* Insertion of all fields of a signature. *)
 
 val add_signature: signature -> t -> t
+val add_signature_lazy: Subst.Lazy.signature_item list -> t -> t
 
 (* Insertion of all fields of a signature, relative to the given path.
    Used to implement open. Returns None if the path refers to a functor,
    not a structure. *)
 val open_signature:
-    ?used_slot:bool ref ->
-    ?loc:Location.t -> ?toplevel:bool ->
-    Asttypes.override_flag -> Path.t ->
-    t -> (t, [`Not_found | `Functor]) result
+    used_slot:bool ref ->
+    loc:Location.t -> toplevel:bool ->
+    Asttypes.override_flag -> Longident.t Location.loc ->
+    t -> Path.t * mode_with_locks * t
 
-val open_pers_signature: string -> t -> (t, [`Not_found]) result
+val open_signature_by_path: Path.t -> t -> t
+
+val open_pers_signature: string -> t -> Path.t * mode_with_locks * t
 
 val remove_last_open: Path.t -> t -> t option
 
 (* Insertion by name *)
 
 val enter_value:
-    ?check:(string -> Warnings.t) ->
+    ?check:(string -> Warnings.t) -> mode:(Mode.allowed * 'r) Mode.Value.t ->
     string -> value_description -> t -> Ident.t * t
 val enter_type:
   ?long_path:bool -> scope:int ->
@@ -367,10 +486,11 @@ val enter_extension:
   extension_constructor -> t -> Ident.t * t
 val enter_module:
   scope:int -> ?arg:bool -> string -> module_presence ->
-  module_type -> t -> Ident.t * t
+  module_type -> ?mode:(Mode.allowed * 'r) Mode.Value.t -> t -> Ident.t * t
 val enter_module_declaration:
   scope:int -> ?arg:bool -> ?shape:Shape.t -> string -> module_presence ->
-  module_declaration -> t -> Ident.t * t
+  module_declaration -> ?mode:(Mode.allowed * 'r) Mode.Value.t ->
+  ?locks:locks -> t -> Ident.t * t
 val enter_modtype:
   scope:int -> string -> modtype_declaration -> t -> Ident.t * t
 val enter_class: scope:int -> string -> class_declaration -> t -> Ident.t * t
@@ -379,57 +499,102 @@ val enter_cltype:
 
 (* Same as [add_signature] but refreshes (new stamp) and rescopes bound idents
    in the process. *)
-val enter_signature: ?mod_shape:Shape.t -> scope:int -> signature -> t ->
-  signature * t
+val enter_signature: ?mod_shape:Shape.t -> scope:int -> signature ->
+  ?mode:(Mode.allowed * 'r) Mode.Value.t -> t -> signature * t
 
 (* Same as [enter_signature] but also extends the shape map ([parent_shape])
    with all the the items from the signature, their shape being a projection
    from the given shape. *)
 val enter_signature_and_shape: scope:int -> parent_shape:Shape.Map.t ->
-  Shape.t -> signature -> t -> signature * Shape.Map.t * t
+  Shape.t -> signature -> ?mode:(Mode.allowed * 'r) Mode.Value.t -> t ->
+  signature * Shape.Map.t * t
 
 val enter_unbound_value : string -> value_unbound_reason -> t -> t
 
 val enter_unbound_module : string -> module_unbound_reason -> t -> t
 
+(* Lock the environment *)
+
+val add_escape_lock : escaping_context -> t -> t
+
+(** `once` variables beyond the share lock cannot be accessed. Moreover,
+    `unique` variables beyond the lock can still be accessed, but will be
+    relaxed to `shared` *)
+val add_share_lock : shared_context -> t -> t
+val add_closure_lock : Mode.Hint.closure_context
+  -> ('l * Mode.allowed) Mode.Value.Comonadic.t -> t -> t
+val add_region_lock : t -> t
+val add_exclave_lock : t -> t
+val add_unboxed_lock : t -> t
+
 (* Initialize the cache of in-core module interfaces. *)
-val reset_cache: unit -> unit
+val reset_cache: preserve_persistent_env:bool -> unit
 
 (* To be called before each toplevel phrase. *)
 val reset_cache_toplevel: unit -> unit
 
-(* Remember the current compilation unit. *)
-val set_current_unit: Unit_info.t -> unit
-val get_current_unit : unit -> Unit_info.t option
-val get_current_unit_name: unit -> string
+(* Remember the name of the current compilation unit. *)
+val set_unit_name: Unit_info.t option -> unit
+val get_unit_name: unit -> Unit_info.t option
 
-(* Read, save a signature to/from a file *)
-val read_signature: Unit_info.Artifact.t -> signature
-        (* Arguments: module name, file name. Results: signature. *)
+(* Read, save a signature to/from a file. *)
+val read_signature:
+  Global_module.Name.t -> Unit_info.Artifact.t
+  -> signature
+        (* Arguments: module name, file name, [add_binding] flag.
+           Results: signature. If [add_binding] is true, creates an entry for
+           the module in the environment. *)
 val save_signature:
-  alerts:alerts -> Types.signature -> Unit_info.Artifact.t
-  -> Cmi_format.cmi_infos
-        (* Arguments: signature, module name, file name. *)
+  alerts:alerts -> Types.signature -> Compilation_unit.Name.t -> Cmi_format.kind
+  -> Unit_info.Artifact.t -> Cmi_format.cmi_infos_lazy
+        (* Arguments: signature, module name, module kind, file name. *)
 val save_signature_with_imports:
-  alerts:alerts -> signature -> Unit_info.Artifact.t -> crcs
-  -> Cmi_format.cmi_infos
-        (* Arguments: signature, module name, file name,
-           imported units with their CRCs. *)
+  alerts:alerts -> signature -> Compilation_unit.Name.t -> Cmi_format.kind
+  -> Unit_info.Artifact.t -> Import_info.t array -> Cmi_format.cmi_infos_lazy
+        (* Arguments: signature, module name, module kind,
+           file name, imported units with their CRCs. *)
+
+(* Register a module as a parameter to this unit. *)
+val register_parameter: Global_module.Parameter_name.t -> unit
 
 (* Return the CRC of the interface of the given compilation unit *)
-val crc_of_unit: modname -> Digest.t
+val crc_of_unit: Compilation_unit.Name.t -> Digest.t
 
 (* Return the set of compilation units imported, with their CRC *)
-val imports: unit -> crcs
+val imports: unit -> Import_info.t list
 
 (* may raise Persistent_env.Consistbl.Inconsistency *)
-val import_crcs: source:string -> crcs -> unit
+val import_crcs: source:string -> Import_info.t array -> unit
+
+(* Return the set of imports represented as runtime parameters (see
+   [Persistent_env.runtime_parameter_bindings] for details) *)
+val runtime_parameter_bindings: unit -> (Global_module.t * Ident.t) list
+
+(* Return whether an ident appears in [runtime_parameter_bindings] *)
+val is_bound_to_runtime_parameter: Ident.t -> bool
+
+(* Return the list of parameters specified for the current unit, in
+   alphabetical order *)
+val parameters: unit -> Global_module.Parameter_name.t list
 
 (* [is_imported_opaque md] returns true if [md] is an opaque imported module *)
-val is_imported_opaque: modname -> bool
+val is_imported_opaque: Compilation_unit.Name.t -> bool
 
 (* [register_import_as_opaque md] registers [md] as an opaque imported module *)
-val register_import_as_opaque: modname -> unit
+val register_import_as_opaque: Compilation_unit.Name.t -> unit
+
+(* [is_parameter_unit md] returns true if [md] was compiled with
+   -as-parameter *)
+val is_parameter_unit: Global_module.Name.t -> bool
+
+(* [implemented_parameter md] is the argument given to -as-argument-for when
+   [md] was compiled *)
+val implemented_parameter:
+  Global_module.Name.t -> Global_module.Parameter_name.t option
+
+(* [is_imported_parameter md] is true if [md] has been imported and is a
+   parameter to this module *)
+val is_imported_parameter: Global_module.Name.t -> bool
 
 (* Summaries -- compact representation of an environment, to be
    exported in debugging information. *)
@@ -455,6 +620,7 @@ type error =
   | Missing_module of Location.t * Path.t * Path.t
   | Illegal_value_name of Location.t * string
   | Lookup_error of Location.t * t * lookup_error
+  | Incomplete_instantiation of { unset_param : Global_module.Parameter_name.t; }
 
 exception Error of error
 
@@ -471,7 +637,9 @@ val in_signature: bool -> t -> t
 val is_in_signature: t -> bool
 
 val set_value_used_callback:
-    value_description -> (unit -> unit) -> unit
+    Subst.Lazy.value_description -> (unit -> unit) -> unit
+val set_value_mutated_callback:
+    Subst.Lazy.value_description -> (unit -> unit) -> unit
 val set_type_used_callback:
     type_declaration -> ((unit -> unit) -> unit) -> unit
 
@@ -489,15 +657,19 @@ val check_well_formed_module:
 (* Forward declaration to break mutual recursion with Typecore. *)
 val add_delayed_check_forward: ((unit -> unit) -> unit) ref
 (* Forward declaration to break mutual recursion with Mtype. *)
-val strengthen:
-    (aliasable:bool -> t -> Subst.Lazy.modtype ->
-     Path.t -> Subst.Lazy.modtype) ref
+val scrape_alias:
+    (t -> Subst.Lazy.module_type -> Subst.Lazy.module_type) ref
 (* Forward declaration to break mutual recursion with Ctype. *)
 val same_constr: (t -> type_expr -> type_expr -> bool) ref
+(* Forward declaration to break mutual recursion with Ctype. *)
+val constrain_type_jkind:
+  (t -> type_expr -> jkind_r -> (unit, Jkind.Violation.t) result) ref
 (* Forward declaration to break mutual recursion with Printtyp. *)
 val print_longident: Longident.t Format_doc.printer ref
 (* Forward declaration to break mutual recursion with Printtyp. *)
-val print_path: Path.t Format_doc.printer ref
+val print_path: (Format.formatter -> Path.t -> unit) ref
+(* Forward declaration to break mutual recursion with Printtyp. *)
+val print_type_expr: (Format.formatter -> Types.type_expr -> unit) ref
 
 
 (* Forward declaration to break mutual recursion with Printtyp *)
@@ -508,8 +680,8 @@ val shorten_module_path : (t -> Path.t -> Path.t) ref
 (** Folding over all identifiers (for analysis purpose) *)
 
 val fold_values:
-  (string -> Path.t -> value_description -> 'a -> 'a) ->
-  Longident.t option -> t -> 'a -> 'a
+  (string -> Path.t -> Subst.Lazy.value_description -> Mode.Value.l -> 'a -> 'a)
+  -> Longident.t option -> t -> 'a -> 'a
 val fold_types:
   (string -> Path.t -> type_declaration -> 'a -> 'a) ->
   Longident.t option -> t -> 'a -> 'a
@@ -517,7 +689,7 @@ val fold_constructors:
   (constructor_description -> 'a -> 'a) ->
   Longident.t option -> t -> 'a -> 'a
 val fold_labels:
-  (label_description -> 'a -> 'a) ->
+  'rcd record_form -> ('rcd gen_label_description -> 'a -> 'a) ->
   Longident.t option -> t -> 'a -> 'a
 
 (** Persistent structures are only traversed if they are already loaded. *)
@@ -537,10 +709,17 @@ val fold_cltypes:
 
 
 (** Utilities *)
-val scrape_alias: t -> module_type -> module_type
 val check_value_name: string -> Location.t -> unit
 
 val print_address : Format.formatter -> address -> unit
+
+type address_head =
+  | AHunit of Compilation_unit.t
+  | AHlocal of Ident.t
+
+val address_head : address -> address_head
+
+val sharedness_hint : Format.formatter -> shared_context -> unit
 
 val unbound_class : Path.t
 
@@ -554,4 +733,14 @@ val with_cmis : (unit -> 'a) -> 'a
 
 val add_merlin_extension_module: Ident.t -> module_type -> t -> t
 val cleanup_functor_caches : stamp:int -> unit
+val scrape: (t -> module_type -> module_type) ref
 val cleanup_usage_tables : stamp:int -> unit
+
+(** This value should be filled in with [Msupport.raise_error]. [Env] cannot use this
+    function directly because [Msupport] depends on [Env] *)
+val msupport_raise_error : (?ignore_unify:bool -> exn -> unit) ref
+
+type 'acc fold_all_labels_f = {
+  fold_all_labels_f : 'rcd. 'rcd record_form -> 'rcd gen_label_description -> 'acc -> 'acc
+}
+val fold_all_labels: 'a fold_all_labels_f -> Longident.t option -> t -> 'a -> 'a

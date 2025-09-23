@@ -51,9 +51,31 @@ val add_type: Ident.t -> Path.t -> 'k subst -> 'k subst
 val add_module: Ident.t -> Path.t -> 'k subst -> 'k subst
 val add_modtype: Ident.t -> Path.t -> 'k subst -> 'k subst
 
-val for_saving: t -> t
+type additional_action_config =
+   | Duplicate_variables
+   (* [Duplicate_variables] makes it so that any substitution will duplicate
+      variable nodes. Substitution already duplicates non-variable nodes;
+      refer to the comment at the top of [subst.mli].
+   *)
+   | Prepare_for_saving
+   (* [Prepare_for_saving] performs all actions associated with
+      [Duplicate_variables] and additionally prepares layouts for saving by
+      commoning them up, truncating their histories, and performing
+      a check that all unconstrained layouts have been defaulted to value.
+   *)
+
+(* Sets the additional action that runs along with any substitution.
+   See the documentation on [additional_action_config].
+*)
+val with_additional_action: additional_action_config -> t -> t
+
+(* Any of the additional actions involve copying type variables. Calling
+   [reset_additional_action_type_id] resets the id counter used when the copying
+   of type variables needs to mint new type variable ids.
+*)
+val reset_additional_action_type_id: unit -> unit
+
 val make_loc_ghost: t -> t
-val reset_for_saving: unit -> unit
 val change_locs: 'k subst -> Location.t -> 'k subst
 
 val module_path: t -> Path.t -> Path.t
@@ -129,64 +151,34 @@ module Unsafe: sig
 end
 
 module Lazy : sig
-  type module_decl =
-    {
-      mdl_type: modtype;
-      mdl_attributes: Parsetree.attributes;
-      mdl_loc: Location.t;
-      mdl_uid: Uid.t;
-    }
+  include Types.Wrapped
 
-  and modtype =
-    | MtyL_ident of Path.t
-    | MtyL_signature of signature
-    | MtyL_functor of functor_parameter * modtype
-    | MtyL_alias of Path.t
-    | MtyL_for_hole
+  val of_value : 'a -> 'a wrapped
+  val of_lazy : 'a Lazy.t -> 'a wrapped
+  val substitute : t -> 'a wrapped -> 'a wrapped
 
-  and modtype_declaration =
-    {
-      mtdl_type: modtype option;  (* Note: abstract *)
-      mtdl_attributes: Parsetree.attributes;
-      mtdl_loc: Location.t;
-      mtdl_uid: Uid.t;
-    }
-
-  and signature
-
-  and signature_item =
-      SigL_value of Ident.t * value_description * visibility
-    | SigL_type of Ident.t * type_declaration * rec_status * visibility
-    | SigL_typext of Ident.t * extension_constructor * ext_status * visibility
-    | SigL_module of
-        Ident.t * module_presence * module_decl * rec_status * visibility
-    | SigL_modtype of Ident.t * modtype_declaration * visibility
-    | SigL_class of Ident.t * class_declaration * rec_status * visibility
-    | SigL_class_type of Ident.t * class_type_declaration *
-                           rec_status * visibility
-
-  and functor_parameter =
-    | Unit
-    | Named of Ident.t option * modtype
-
-
-  val of_module_decl : Types.module_declaration -> module_decl
-  val of_modtype : Types.module_type -> modtype
+  val of_module_decl : Types.module_declaration -> module_declaration
+  val of_modtype : Types.module_type -> module_type
   val of_modtype_decl : Types.modtype_declaration -> modtype_declaration
   val of_signature : Types.signature -> signature
-  val of_signature_items : signature_item list -> signature
   val of_signature_item : Types.signature_item -> signature_item
+  val of_functor_parameter : Types.functor_parameter -> functor_parameter
+  val of_value_description : Types.value_description -> value_description
 
-  val module_decl : scoping -> t -> module_decl -> module_decl
-  val modtype : scoping -> t -> modtype -> modtype
+  val module_decl : scoping -> t -> module_declaration -> module_declaration
+  val modtype : scoping -> t -> module_type -> module_type
   val modtype_decl : scoping -> t -> modtype_declaration -> modtype_declaration
   val signature : scoping -> t -> signature -> signature
   val signature_item : scoping -> t -> signature_item -> signature_item
+  val value_description : t -> value_description -> value_description
 
-  val force_module_decl : module_decl -> Types.module_declaration
-  val force_modtype : modtype -> Types.module_type
+  val force_module_decl : module_declaration -> Types.module_declaration
+  val force_modtype : module_type -> Types.module_type
   val force_modtype_decl : modtype_declaration -> Types.modtype_declaration
   val force_signature : signature -> Types.signature
   val force_signature_once : signature -> signature_item list
   val force_signature_item : signature_item -> Types.signature_item
+  val force_functor_parameter : functor_parameter -> Types.functor_parameter
+  val force_value_description : value_description -> Types.value_description
+  val force_type_expr : type_expr wrapped -> type_expr
 end

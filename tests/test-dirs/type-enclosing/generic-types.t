@@ -74,7 +74,7 @@ With index 0 only the first type is shown:
           "line": 1,
           "col": 12
         },
-        "type": "(module List)",
+        "type": "(module Stdlib__List)",
         "tail": "no"
       },
       {

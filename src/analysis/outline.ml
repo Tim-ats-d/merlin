@@ -35,8 +35,8 @@ open Typedtree
 open Browse_raw
 open Browse_tree
 
-let name_of_patt = function
-  | { pat_desc = Tpat_var (_, name, _); _ } -> Some name
+let id_of_patt = function
+  | { pat_desc = Tpat_var (id, _, _, _, _); _ } -> Some id
   | _ -> None
 
 let mk ?(children = []) ~location ~deprecated outline_kind outline_type
@@ -55,14 +55,17 @@ let get_class_signature_field_desc_infos = function
   | Typedtree.Tctf_method (outline_name, _, _, _) -> Some (outline_name, `Method)
   | _ -> None
 
-let outline_type ~env typ =
-  let ppf, to_string = Format.to_string () in
-  Printtyp.wrap_printing_env env (fun () ->
-      Type_utils.print_type_with_decl ~verbosity:(Mconfig.Verbosity.Lvl 0) env
-        ppf typ);
-  Some (to_string ())
+let outline_type ~include_types ~env typ =
+  match include_types with
+  | true ->
+    let ppf, to_string = Format.to_string () in
+    Printtyp.wrap_printing_env env (fun () ->
+        Type_utils.print_type_with_decl ~verbosity:(Mconfig.Verbosity.Lvl 0) env
+          ppf typ);
+    Some (to_string ())
+  | false -> None
 
-let rec summarize node =
+let rec summarize ~include_types node =
   let location = node.t_loc in
   match node.t_node with
   | Value_binding vb ->
@@ -73,16 +76,18 @@ let rec summarize node =
     begin
       match name_of_patt vb.vb_pat with
       | None -> None
-      | Some name ->
-        let typ = outline_type ~env:node.t_env vb.vb_pat.pat_type in
-        Some (mk ~children ~location ~deprecated `Value typ name)
+      | Some ident ->
+        let typ =
+          outline_type ~include_types ~env:node.t_env vb.vb_pat.pat_type
+        in
+        Some (mk ~location ~deprecated `Value typ ident)
     end
   | Value_description vd ->
     let deprecated = Type_utils.is_deprecated vd.val_attributes in
-    let typ = outline_type ~env:node.t_env vd.val_val.val_type in
-    Some (mk ~location ~deprecated `Value typ vd.val_name)
+    let typ = outline_type ~include_types ~env:node.t_env vd.val_val.val_type in
+    Some (mk ~location ~deprecated `Value typ vd.val_id)
   | Module_declaration md ->
-    let children = get_mod_children node in
+    let children = get_mod_children ~include_types node in
     begin
       match md.md_name with
       | { txt = None; _ } -> None
@@ -91,7 +96,7 @@ let rec summarize node =
         Some (mk ~children ~location ~deprecated `Module None { txt; loc })
     end
   | Module_binding mb ->
-    let children = get_mod_children node in
+    let children = get_mod_children ~include_types node in
     begin
       match mb.mb_name with
       | { txt = None; _ } -> None
@@ -100,7 +105,7 @@ let rec summarize node =
         Some (mk ~children ~location ~deprecated `Module None { txt; loc })
     end
   | Module_type_declaration mtd ->
-    let children = get_mod_children node in
+    let children = get_mod_children ~include_types node in
     let deprecated = Type_utils.is_deprecated mtd.mtd_attributes in
     Some (mk ~deprecated ~children ~location `Modtype None mtd.mtd_name)
   | Type_declaration td ->
@@ -125,7 +130,7 @@ let rec summarize node =
     let name = Path.name te.tyext_path in
     let children =
       List.filter_map (Lazy.force node.t_children) ~f:(fun x ->
-          summarize x >>| fun x ->
+          summarize ~include_types x >>| fun x ->
           { x with Query_protocol.outline_kind = `Constructor })
     in
     let deprecated = Type_utils.is_deprecated te.tyext_attributes in
@@ -202,29 +207,31 @@ and get_class_elements node =
                }))
   | _ -> []
 
-and get_class_field_desc_infos = function
-  | Typedtree.Tcf_val (str_loc, _, _, _field_kind, _) -> Some (str_loc, `Value)
-  | Typedtree.Tcf_method (str_loc, _, _field_kind) -> Some (str_loc, `Method)
-  | _ -> None
+and get_mod_children ~include_types node =
+  List.concat_map
+    (Lazy.force node.t_children)
+    ~f:(remove_mod_indir ~include_types)
 
-and get_mod_children node =
-  List.concat_map (Lazy.force node.t_children) ~f:remove_mod_indir
-
-and remove_mod_indir node =
+and remove_mod_indir ~include_types node =
   match node.t_node with
   | Module_expr _ | Module_type _ ->
-    List.concat_map (Lazy.force node.t_children) ~f:remove_mod_indir
-  | _ -> remove_top_indir node
+    List.concat_map
+      (Lazy.force node.t_children)
+      ~f:(remove_mod_indir ~include_types)
+  | _ -> remove_top_indir ~include_types node
 
-and remove_top_indir t =
+and remove_top_indir ~include_types t =
   match t.t_node with
   | Structure _ | Signature _ ->
-    List.concat_map ~f:remove_top_indir (Lazy.force t.t_children)
+    List.concat_map
+      ~f:(remove_top_indir ~include_types)
+      (Lazy.force t.t_children)
   | Signature_item _ | Structure_item _ ->
-    List.filter_map (Lazy.force t.t_children) ~f:summarize
+    List.filter_map (Lazy.force t.t_children) ~f:(summarize ~include_types)
   | _ -> []
 
-let get browses = List.concat @@ List.rev_map ~f:remove_top_indir browses
+let get ~include_types browses =
+  List.concat @@ List.rev_map ~f:(remove_top_indir ~include_types) browses
 
 let shape cursor nodes =
   let rec aux node =

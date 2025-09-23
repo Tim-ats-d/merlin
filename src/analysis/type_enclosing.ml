@@ -114,7 +114,7 @@ let from_reconstructed ~nodes ~cursor ~verbosity exprs =
     | Some (Context.Constructor (cd, loc)) ->
       log ~title:"from_reconstructed" "ctx: constructor %s" cd.cstr_name;
       Some (loc, Type_constr (env, cd), `No)
-    | Some (Context.Label { lbl_name; lbl_arg; _ }) ->
+    | Some (Context.Label ({ lbl_name; lbl_arg; _ }, _)) ->
       log ~title:"from_reconstructed" "ctx: label %s" lbl_name;
       Some (loc, Type (env, lbl_arg), `No)
     | Some Context.Constant -> None

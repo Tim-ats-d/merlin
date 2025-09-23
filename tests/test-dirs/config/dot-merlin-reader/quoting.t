@@ -53,9 +53,10 @@
         "intf": ".rei"
       }
     ],
-    "stdlib": null,
+    "stdlib": "lib/ocaml",
     "source_root": null,
     "unit_name": null,
+    "unit_name_for": {},
     "wrapping_prefix": null,
     "reader": [],
     "protocol": "json",

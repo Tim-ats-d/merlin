@@ -7,7 +7,7 @@ let usage_msg =
 
 let verbose = ref false
 let debug = ref false
-let input_files = ref []
+let input_files_rev = ref []
 let build_path_rev = ref ({ visible = []; hidden = [] } : Load_path.paths)
 let output_file = ref "project.ocaml-index"
 let root = ref ""
@@ -15,12 +15,21 @@ let rewrite_root = ref false
 let store_shapes = ref false
 let do_not_use_cmt_loadpath = ref false
 
-type command = Aggregate | Dump | Stats
+type command =
+  | Aggregate
+  | Dump
+  | Dump_file_stats
+  | Stats
+  | Gather_shapes
+  | Magic_numbers
 
 let parse_command = function
   | "aggregate" -> Some Aggregate
   | "dump" -> Some Dump
+  | "dump-file-stats" -> Some Dump_file_stats
   | "stats" -> Some Stats
+  | "gather-shapes" -> Some Gather_shapes
+  | "magic-numbers" -> Some Magic_numbers
   | _ -> None
 
 let command = ref None
@@ -32,8 +41,8 @@ let anon_fun arg =
     | Some cmd -> command := Some cmd
     | None ->
       command := Some Aggregate;
-      input_files := arg :: !input_files)
-  | Some _ -> input_files := arg :: !input_files
+      input_files_rev := arg :: !input_files_rev)
+  | Some _ -> input_files_rev := arg :: !input_files_rev
 
 let speclist =
   [ ("--verbose", Arg.Set verbose, "Output more information");
@@ -83,13 +92,27 @@ let () =
         { visible = List.rev !build_path_rev.visible;
           hidden = List.rev !build_path_rev.hidden
         }
-      ~do_not_use_cmt_loadpath:!do_not_use_cmt_loadpath !input_files
+      ~do_not_use_cmt_loadpath:!do_not_use_cmt_loadpath
+      (List.rev !input_files_rev)
   | Some Dump ->
     List.iter
+      (fun file -> Index_format.(read_exn ~file |> pp Format.std_formatter))
+      (List.rev !input_files_rev)
+  | Some Dump_file_stats ->
+    List.iter
       (fun file ->
-        let index = Index_format.read_exn ~file in
-        Index_format.pp Format.std_formatter index)
-      !input_files
+        let open Merlin_index_format.Index_format in
+        let index = read_exn ~file in
+        Printf.printf "File stats for index %S:\n" file;
+        Stats.iter
+          (fun file { mtime; size; source_digest } ->
+            Printf.printf "  %S: { mtime=%f; size=%d; source_digest=%S }\n" file
+              mtime size
+              (Option.value source_digest ~default:"none"))
+          index.stats)
+      (List.rev !input_files_rev)
+  | Some Gather_shapes ->
+    Index.gather_shapes ~output_file:!output_file (List.rev !input_files_rev)
   | Some Stats ->
     List.iter
       (fun file ->
@@ -111,6 +134,10 @@ let () =
           (Uid_map.cardinal approximated)
           (Hashtbl.length cu_shape)
           (Option.value ~default:"none" root_directory))
-      !input_files
-  | _ -> Printf.printf "Nothing to do.\n%!");
+      (List.rev !input_files_rev)
+  | Some Magic_numbers ->
+    let json = Config.Magic_numbers.(to_json current) in
+    Yojson.Basic.to_channel stdout json;
+    print_newline ()
+  | None -> Printf.printf "Nothing to do.\n%!");
   exit 0

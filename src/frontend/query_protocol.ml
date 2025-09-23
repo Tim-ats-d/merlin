@@ -101,8 +101,18 @@ type shape = { shape_loc : Location_aux.t; shape_sub : shape list }
 
 type error_filter = { lexing : bool; parsing : bool; typing : bool }
 
-type syntax_doc_result =
-  { name : string; description : string; documentation : string }
+module Syntax_doc_result = struct
+  module Level = struct
+    type t = Simple | Advanced
+  end
+
+  type t =
+    { name : string;
+      description : string;
+      documentation : string option;
+      level : Level.t
+    }
+end
 
 type ppxed_source =
   { code : string; attr_start : Lexing.position; attr_end : Lexing.position }
@@ -133,8 +143,59 @@ type occurrences_status =
 
 type occurrence = { loc : Location.t; is_stale : bool }
 
+module Locate_context = struct
+  type t =
+    | Expr
+    | Module_path
+    | Module_type
+    | Patt
+    | Type
+    | Constant
+    | Constructor
+    | Label
+    | Unknown
+
+  let to_string = function
+    | Expr -> "expr"
+    | Module_path -> "module_path"
+    | Module_type -> "module_type"
+    | Patt -> "pattern"
+    | Type -> "type"
+    | Constant -> "constant"
+    | Constructor -> "constructor"
+    | Label -> "label"
+    | Unknown -> "unknown"
+
+  let of_string = function
+    | "expr" -> Some Expr
+    | "module_path" -> Some Module_path
+    | "module_type" -> Some Module_type
+    | "pattern" -> Some Patt
+    | "type" -> Some Type
+    | "constant" -> Some Constant
+    | "constructor" -> Some Constructor
+    | "label" -> Some Label
+    | "unknown" -> Some Unknown
+    | _ -> None
+
+  let all =
+    [ Expr;
+      Module_path;
+      Module_type;
+      Patt;
+      Type;
+      Constant;
+      Constructor;
+      Label;
+      Unknown
+    ]
+end
+
 type _ t =
   | Type_expr (* *) : string * Msource.position -> string t
+  | Stack_or_heap_enclosing (* *) :
+      Msource.position * bool * int option
+      -> (Location.t * [ `String of string | `Index of int ]) list t
   | Type_enclosing (* *) :
       (string * int) option * Msource.position * int option
       -> (Location.t * [ `String of string | `Index of int ] * is_tail_position)
@@ -170,7 +231,7 @@ type _ t =
          t
   | Syntax_document :
       Msource.position
-      -> [ `Found of syntax_doc_result | `No_documentation ] t
+      -> [ `Found of Syntax_doc_result.t | `No_documentation ] t
   | Expand_ppx : Msource.position -> [ `Found of ppxed_source | `No_ppx ] t
   | Locate_type :
       Msource.position
@@ -183,7 +244,10 @@ type _ t =
          | `At_origin ]
          t
   | Locate (* *) :
-      string option * [ `ML | `MLI ] * Msource.position
+      string option
+      * [ `ML | `MLI ]
+      * Msource.position
+      * Locate_context.t option
       -> [ `Found of string option * Lexing.position
          | `Invalid_context
          | `Builtin of string
@@ -206,7 +270,7 @@ type _ t =
   | Inlay_hints :
       Msource.position * Msource.position * bool * bool * bool * bool
       -> (Lexing.position * string) list t
-  | Outline (* *) : outline t
+  | Outline (* *) : { include_types : bool } -> outline t
   | Shape (* *) : Msource.position -> shape list t
   | Errors (* *) : error_filter -> Location.error list t
   | Dump : Std.json list -> Std.json t
@@ -222,4 +286,4 @@ type _ t =
       (** In current version, Merlin only uses the parameter [position] to answer
         signature_help queries. The additionnal parameters are described in the
         LSP protocol and might enable finer behaviour in the future. *)
-  | Version : string t
+  | Version : (string * Config.Magic_numbers.t) t

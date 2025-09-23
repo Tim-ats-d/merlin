@@ -1648,3 +1648,28 @@
     ],
     "notifications": []
   }
+  $ $MERLIN single outline < path.ml | jq '.value[].type'
+  "A.a"
+  null
+  $ $MERLIN single outline -short-paths < path.ml | jq '.value[].type'
+  "a"
+  null
+
+Check that when we pass "-include-types false", every "type" is null.
+  $ $MERLIN single outline -include-types false < foo.ml \
+  >   | jq '.value | .. | objects | select(has("type")) | .type'
+  null
+  null
+  null
+  null
+  null
+  null
+  null
+  null
+  null
+  null
+  null
+  null
+  null
+  null
+  null

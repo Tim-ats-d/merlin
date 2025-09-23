@@ -35,8 +35,12 @@ type t =
     (* We attach the constructor description here so in the case of
        disambiguated constructors we actually directly look for the type
        path (cf. #486, #794). *)
+  | Unknown_constructor
   | Expr
-  | Label of Types.label_description (* Similar to constructors. *)
+  | Label :
+      'rep Types.gen_label_description * 'rep Types.record_form
+      -> t (* Similar to constructors. *)
+  | Unknown_label
   | Module_path
   | Module_type
   | Patt
@@ -46,14 +50,29 @@ type t =
 
 let to_string = function
   | Constructor (cd, _) -> Printf.sprintf "constructor %s" cd.cstr_name
+  | Unknown_constructor -> Printf.sprintf "unknown constructor"
   | Expr -> "expression"
-  | Label lbl -> Printf.sprintf "record field %s" lbl.lbl_name
+  | Label (lbl, Legacy) -> Printf.sprintf "record field %s" lbl.lbl_name
+  | Label (lbl, Unboxed_product) ->
+    Printf.sprintf "unboxed record field %s" lbl.lbl_name
+  | Unknown_label -> Printf.sprintf "(unboxed?) record field"
   | Module_path -> "module path"
   | Module_type -> "module type"
   | Patt -> "pattern"
   | Constant -> "constant"
   | Type -> "type"
   | Unknown -> "unknown"
+
+let of_locate_context : Query_protocol.Locate_context.t -> t = function
+  | Expr -> Expr
+  | Module_path -> Module_path
+  | Module_type -> Module_type
+  | Patt -> Patt
+  | Type -> Type
+  | Constant -> Constant
+  | Constructor -> Unknown_constructor
+  | Label -> Unknown_label
+  | Unknown -> Unknown
 
 (* Distinguish between "Mo[d]ule.something" and "Module.some[t]hing" *)
 let cursor_on_longident_end ~cursor:cursor_pos
@@ -79,8 +98,9 @@ let inspect_pattern (type a) ~cursor ~lid (p : a Typedtree.general_pattern) =
       Format.fprintf fmt "current pattern is: %a" (Printtyped.pattern 0) p);
   match p.pat_desc with
   | Tpat_any when Longident.last lid = "_" -> None
-  | Tpat_var (_, str_loc, _) when Longident.last lid = str_loc.txt -> None
-  | Tpat_alias (_, _, str_loc, _) when Longident.last lid = str_loc.txt ->
+  | Tpat_var (_, str_loc, _, _, _) when Longident.last lid = str_loc.txt -> None
+  | Tpat_alias (_, _, str_loc, _, _, _, _) when Longident.last lid = str_loc.txt
+    ->
     (* Assumption: if [Browse.enclosing] stopped on this node and not on the
        subpattern, then it must mean that the cursor is on the alias. *)
     None
@@ -96,14 +116,14 @@ let inspect_pattern (type a) ~cursor ~lid (p : a Typedtree.general_pattern) =
 
 let inspect_expression ~cursor ~lid e : t =
   match e.Typedtree.exp_desc with
-  | Texp_construct (lid_loc, cd, _) ->
+  | Texp_construct (lid_loc, cd, _, _) ->
     (* TODO: is this first test necessary ? *)
     if Longident.last lid = Longident.last lid_loc.txt then
       if cursor_on_longident_end ~cursor ~lid_loc cd.cstr_name then
         Constructor (cd, lid_loc.loc)
       else Module_path
     else Module_path
-  | Texp_ident (p, lid_loc, _) ->
+  | Texp_ident (p, lid_loc, _, _, _) ->
     let name = Path.last p in
     log ~title:"inspect_context" "name is: [%s]" name;
     if name = "*type-error*" then
@@ -118,10 +138,10 @@ let inspect_expression ~cursor ~lid e : t =
   | Texp_constant _ -> Constant
   | _ -> Expr
 
-let inspect_browse_tree ~cursor lid browse : t option =
+let inspect_browse_tree ?let_pun_behavior ~cursor lid browse : t option =
   log ~title:"inspect_context" "current node is: [%s]"
     (String.concat ~sep:"|" (List.map ~f:(Mbrowse.print ()) browse));
-  match Mbrowse.enclosing cursor browse with
+  match Mbrowse.enclosing ?let_pun_behavior cursor browse with
   | [] ->
     log ~title:"inspect_context" "no enclosing around: %a" Lexing.print_position
       cursor;
@@ -144,9 +164,10 @@ let inspect_browse_tree ~cursor lid browse : t option =
     | Module_type _ -> Some Module_type
     | Core_type { ctyp_desc = Ttyp_package _; _ } -> Some Module_type
     | Core_type _ -> Some Type
-    | Record_field (_, lbl, _) when Longident.last lid = lbl.lbl_name ->
+    | Record_field (_, lbl, record_form, _)
+      when Longident.last lid = lbl.lbl_name ->
       (* if we stopped here, then we're on the label itself, and whether or
           not punning is happening is not important *)
-      Some (Label lbl)
+      Some (Label (lbl, record_form))
     | Expression e -> Some (inspect_expression ~cursor ~lid e)
     | _ -> Some Unknown)

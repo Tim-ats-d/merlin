@@ -48,32 +48,28 @@ type type_structure =
   | Unboxed of argument_to_unbox
 
 let structure : type_definition -> type_structure = fun def ->
-  match def.type_kind with
-  | Type_open -> Open
-  | Type_abstract _ ->
+  match (def.type_kind, find_unboxed_type def) with
+  | Type_open, _ -> Open
+  | Type_abstract _, _ ->
       begin match def.type_manifest with
       | None -> Abstract
       | Some type_expr ->
         if Msupport.erroneous_type_check type_expr then Abstract else
         Synonym type_expr
       end
-
-  | ( Type_record ([{ld_type = ty; _}], Record_unboxed _)
-    | Type_variant ([{cd_args = Cstr_tuple [ty]; _}], Variant_unboxed)
-    | Type_variant ([{cd_args = Cstr_record [{ld_type = ty; _}]; _}],
-                    Variant_unboxed)) ->
-     let params =
-       match def.type_kind with
-       | Type_variant ([{cd_res = Some ret_type}], _) ->
-          begin match get_desc ret_type with
-          | Tconstr (_, tyl, _) -> tyl
-          | _ -> assert false
-          end
-       | _ -> def.type_params
-     in
-     Unboxed { argument_type = ty; result_type_parameter_instances = params }
-
-  | Type_record _ | Type_variant _ -> Algebraic
+  | (Type_record _ | Type_variant _), None -> Algebraic
+  | Type_record_unboxed_product _, None -> Algebraic
+  | (Type_record _ | Type_record_unboxed_product _ | Type_variant _), Some (ty, _) ->
+      let params =
+        match def.type_kind with
+        | Type_variant ([{cd_res = Some ret_type}], _, _) ->
+            begin match get_desc ret_type with
+            | Tconstr (_, tyl, _) -> tyl
+            | _ -> assert false
+            end
+        | _ -> def.type_params
+      in
+      Unboxed { argument_type = ty; result_type_parameter_instances = params }
 
 type error =
   | Non_separable_evar of string option
@@ -134,7 +130,8 @@ let rec immediate_subtypes : type_expr -> type_expr list = fun ty ->
      on which immediate_subtypes is called from [check_type] *)
   | Tarrow(_,ty1,ty2,_) ->
       [ty1; ty2]
-  | Ttuple(tys) -> tys
+  | Ttuple(tys) -> List.map snd tys
+  | Tunboxed_tuple(tys) -> List.map snd tys
   | Tpackage(_, fl) -> (snd (List.split fl))
   | Tobject(row,class_ty) ->
       let class_subtys =
@@ -154,6 +151,7 @@ let rec immediate_subtypes : type_expr -> type_expr list = fun ty ->
       immediate_subtypes_object_row [] ty
   | Tlink _ | Tsubst _ -> assert false (* impossible due to Ctype.repr *)
   | Tvar _ | Tunivar _ -> []
+  | Tof_kind _ -> []
   | Tpoly (pty, _) -> [pty]
   | Tconstr (_path, tys, _) -> tys
 
@@ -189,7 +187,7 @@ let free_variables ty =
   Ctype.free_variables ty
   |> List.map (fun ty ->
       match get_desc ty with
-        Tvar text -> {text; id = get_id ty}
+        Tvar { name = text } -> {text; id = get_id ty}
       | _ ->
           (* Ctype.free_variables only returns Tvar nodes *)
           assert false)
@@ -388,9 +386,12 @@ let worst_case ty =
     such that [ty] is separable at mode [m] in [gamma], under
     the signature [sigma]. *)
 let check_type
-  : Env.t -> type_expr -> mode -> context
-  = fun env ty m ->
+  : upstream_compatible:bool -> Env.t -> type_expr -> mode -> context
+  = fun ~upstream_compatible env ty m ->
   let rec check_type hyps ty m =
+    if not upstream_compatible
+      && Ctype.check_type_separability env ty Non_float
+    then empty else
     if Hyps.safe ty m hyps then empty
     else if Hyps.unsafe ty m hyps then worst_case ty
     else
@@ -403,18 +404,21 @@ let check_type
     (* "Indifferent" case, the empty context is sufficient. *)
     | (_                  , Ind    ) -> empty
     (* Variable case, add constraint. *)
-    | (Tvar(alpha)        , m      ) ->
-        TVarMap.singleton {text = alpha; id = get_id ty} m
+    | (Tvar { name }      , m      ) ->
+        TVarMap.singleton {text = name; id = get_id ty} m
     (* "Separable" case for constructors with known memory representation. *)
     | (Tarrow _           , Sep    )
     | (Ttuple _           , Sep    )
+    | (Tunboxed_tuple _   , Sep    )
     | (Tvariant(_)        , Sep    )
     | (Tobject(_,_)       , Sep    )
     | ((Tnil | Tfield _)  , Sep    )
-    | (Tpackage(_,_)      , Sep    ) -> empty
+    | (Tpackage(_,_)      , Sep    )
+    | (Tof_kind(_)        , Sep    ) -> empty
     (* "Deeply separable" case for these same constructors. *)
     | (Tarrow _           , Deepsep)
     | (Ttuple _           , Deepsep)
+    | (Tunboxed_tuple _   , Deepsep)
     | (Tvariant(_)        , Deepsep)
     | (Tobject(_,_)       , Deepsep)
     | ((Tnil | Tfield _)  , Deepsep)
@@ -446,6 +450,7 @@ let check_type
     | (Tpoly(pty,_)       , m      ) ->
         check_type hyps pty m
     | (Tunivar(_)         , _      ) -> empty
+    | (Tof_kind(_)         , _      ) -> empty
     (* Type constructor case. *)
     | (Tconstr(path,tys,_), m      ) ->
         let msig = (Env.find_type path env).type_separability in
@@ -474,10 +479,14 @@ let worst_msig decl = List.map (fun _ -> Deepsep) decl.type_params
 
     Note: this differs from {!Types.Separability.default_signature},
     which does not have access to the declaration and its immediacy. *)
-let msig_of_external_type decl =
-  match decl.type_immediate with
-  | Always | Always_on_64bits -> best_msig decl
-  | Unknown -> worst_msig decl
+let msig_of_external_type env decl =
+  let context = Ctype.mk_jkind_context_check_principal env in
+  let is_external =
+    match Jkind.get_externality_upper_bound ~context decl.type_jkind with
+    | Internal -> false
+    | External | External64 -> true
+  in
+  if is_external then best_msig decl else worst_msig decl
 
 (** [msig_of_context ~decl_loc constructor context] returns the
    separability signature of a single-constructor type whose
@@ -540,8 +549,8 @@ let msig_of_context : decl_loc:Location.t -> parameters:type_expr list
         | Ind -> true
         | Sep | Deepsep -> false in
       match get_desc param_instance with
-      | Tvar text ->
-          let var = {text; id = get_id param_instance} in
+      | Tvar { name } ->
+          let var = {text = name; id = get_id param_instance} in
           (get context var) :: acc, (set_ind context var)
       | _ ->
           let instance_exis = free_variables param_instance in
@@ -599,6 +608,26 @@ let msig_of_context : decl_loc:Location.t -> parameters:type_expr list
     TVarMap.iter check_existential context;
     mode_signature
 
+let check_separability_with_upstream_compat ~loc ~parameters env ty m =
+  (* It's complicated to properly incorporate the upstream-compatibility
+     logic into the code above, so we just run the check twice. *)
+  let upstream_result =
+    try
+      let ctx = check_type ~upstream_compatible:true env ty m in
+      Some (msig_of_context ~decl_loc:loc ~parameters ctx)
+    with Error _ -> None
+  in
+  match upstream_result with
+  | Some msig -> msig
+  | None ->
+      let ctx = check_type ~upstream_compatible:false env ty m in
+      let msig = msig_of_context ~decl_loc:loc ~parameters ctx in
+      if Language_extension.erasable_extensions_only () then
+        Location.prerr_warning loc
+          (Warnings.Incompatible_with_upstream
+            Warnings.Separability_check);
+      msig
+
 (** [check_def env def] returns the signature required
     for the type definition [def] in the typing environment [env].
 
@@ -611,16 +640,16 @@ let check_def
   = fun env def ->
   match structure def with
   | Abstract ->
-      msig_of_external_type def
+      msig_of_external_type env def
   | Synonym type_expr ->
-      check_type env type_expr Sep
-      |> msig_of_context ~decl_loc:def.type_loc ~parameters:def.type_params
+      check_separability_with_upstream_compat ~loc:def.type_loc
+        ~parameters:def.type_params env type_expr Sep
   | Open | Algebraic ->
       best_msig def
   | Unboxed constructor ->
-      check_type env constructor.argument_type Sep
-      |> msig_of_context ~decl_loc:def.type_loc
-           ~parameters:constructor.result_type_parameter_instances
+      check_separability_with_upstream_compat ~loc:def.type_loc
+        ~parameters:constructor.result_type_parameter_instances
+        env constructor.argument_type Sep
 
 let compute_decl env decl =
   if Config.flat_float_array then check_def env decl
@@ -662,7 +691,7 @@ let property : (prop, unit) Typedecl_properties.property =
   let default decl = best_msig decl in
   let compute env decl () = compute_decl env decl in
   let update_decl decl type_separability = { decl with type_separability } in
-  let check _env _id _decl () = () in (* FIXME run final check? *)
+  let check _env _id _decl _req = () in (* FIXME run final check? *)
   { eq; merge; default; compute; update_decl; check; }
 
 (* Definition using the fixpoint infrastructure. *)

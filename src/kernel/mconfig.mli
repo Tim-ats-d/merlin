@@ -19,7 +19,14 @@ type ocaml =
     open_modules : string list;
     ppx : string with_workdir list;
     pp : string with_workdir option;
-    warnings : Warnings.state
+    warnings : Warnings.state;
+    cmi_file : string option;
+    parameters : string list;
+    as_parameter : bool;
+    as_argument_for : string option;
+    zero_alloc_check : Zero_alloc_annotations.Check.t;
+    zero_alloc_assert : Zero_alloc_annotations.Assert.t;
+    infer_with_bounds : bool
   }
 
 val dump_ocaml : ocaml -> json
@@ -39,6 +46,7 @@ type merlin =
     stdlib : string option;
     source_root : string option;
     unit_name : string option;
+    unit_name_for : string String.Map.t;
     wrapping_prefix : string option;
     reader : string list;
     protocol : [ `Json | `Sexp ];
@@ -115,6 +123,8 @@ val document_arguments : out_channel -> unit
 (** {1 Computing project paths} *)
 
 val source_path : t -> string list
+
+val hidden_source_path : t -> string list
 
 val build_path : t -> string list
 

@@ -59,11 +59,25 @@ let structure_iterator hint_let_binding hint_pattern_binding
       | Texp_letop { body; _ } ->
         let () = log ~title:"expression" "on let-op" in
         case_iterator hint_let_binding iterator body
-      | Texp_match (expr, cases, _, _) ->
+      | Texp_match (expr, _, cases, _) ->
         let () = log ~title:"expression" "on match" in
         let () = iterator.expr iterator expr in
         List.iter ~f:(case_iterator hint_pattern_binding iterator) cases
-      | Texp_function (args, body) -> (
+      | Texp_function
+          { body =
+              Tfunction_cases
+                { fc_cases =
+                    [ { c_rhs =
+                          { exp_desc = Texp_let (_, [ { vb_pat; _ } ], body);
+                            _
+                          };
+                        _
+                      }
+                    ];
+                  _
+                };
+            _
+          } ->
         let () = log ~title:"expression" "on function" in
         if hint_function_params then
           List.iter args ~f:(fun Typedtree.{ fp_kind; _ } ->

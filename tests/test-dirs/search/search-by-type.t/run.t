@@ -136,11 +136,11 @@
       {
         "file": "hashtbl.mli",
         "start": {
-          "line": 117,
+          "line": 121,
           "col": 0
         },
         "end": {
-          "line": 117,
+          "line": 121,
           "col": 40
         },
         "name": "Hashtbl.add",
@@ -152,11 +152,11 @@
       {
         "file": "hashtbl.mli",
         "start": {
-          "line": 152,
+          "line": 156,
           "col": 0
         },
         "end": {
-          "line": 152,
+          "line": 156,
           "col": 44
         },
         "name": "Hashtbl.replace",
@@ -168,11 +168,11 @@
       {
         "file": "hashtbl.mli",
         "start": {
-          "line": 302,
+          "line": 306,
           "col": 0
         },
         "end": {
-          "line": 302,
+          "line": 306,
           "col": 50
         },
         "name": "Hashtbl.add_seq",
@@ -184,11 +184,11 @@
       {
         "file": "hashtbl.mli",
         "start": {
-          "line": 306,
+          "line": 310,
           "col": 0
         },
         "end": {
-          "line": 306,
+          "line": 310,
           "col": 54
         },
         "name": "Hashtbl.replace_seq",
@@ -198,14 +198,14 @@
         "constructible": "Hashtbl.replace_seq _ _"
       },
       {
-        "file": "either.mli",
+        "file": "stdlib/either.mli",
         "start": {
-          "line": 86,
+          "line": 98,
           "col": 0
         },
         "end": {
-          "line": 87,
-          "col": 73
+          "line": 100,
+          "col": 75
         },
         "name": "Either.map",
         "type": "left:('a1 -> 'a2) ->
@@ -217,11 +217,11 @@
       {
         "file": "moreLabels.mli",
         "start": {
-          "line": 134,
+          "line": 140,
           "col": 2
         },
         "end": {
-          "line": 134,
+          "line": 140,
           "col": 51
         },
         "name": "MoreLabels.Hashtbl.add",
@@ -233,11 +233,11 @@
       {
         "file": "moreLabels.mli",
         "start": {
-          "line": 319,
+          "line": 325,
           "col": 2
         },
         "end": {
-          "line": 319,
+          "line": 325,
           "col": 52
         },
         "name": "MoreLabels.Hashtbl.add_seq",
@@ -249,11 +249,11 @@
       {
         "file": "moreLabels.mli",
         "start": {
-          "line": 169,
+          "line": 175,
           "col": 2
         },
         "end": {
-          "line": 169,
+          "line": 175,
           "col": 55
         },
         "name": "MoreLabels.Hashtbl.replace",
@@ -265,11 +265,11 @@
       {
         "file": "moreLabels.mli",
         "start": {
-          "line": 323,
+          "line": 329,
           "col": 2
         },
         "end": {
-          "line": 323,
+          "line": 329,
           "col": 56
         },
         "name": "MoreLabels.Hashtbl.replace_seq",
@@ -281,11 +281,11 @@
       {
         "file": "ephemeron.mli",
         "start": {
-          "line": 203,
+          "line": 218,
           "col": 2
         },
         "end": {
-          "line": 203,
+          "line": 218,
           "col": 55
         },
         "name": "Ephemeron.K2.query",

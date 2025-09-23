@@ -18,6 +18,7 @@
 open Asttypes
 open Path
 open Types
+open Mode
 open Typedtree
 
 type position = Errortrace.position = First | Second
@@ -28,9 +29,76 @@ type primitive_mismatch =
   | Name
   | Arity
   | No_alloc of position
+  | Builtin
+  | Effects
+  | Coeffects
   | Native_name
   | Result_repr
   | Argument_repr of int
+  | Layout_poly_attr
+
+type value_mismatch =
+  | Primitive_mismatch of primitive_mismatch
+  | Not_a_primitive
+  | Type of Errortrace.moregen_error
+  | Zero_alloc of Zero_alloc.error
+  | Modality of Mode.Modality.error
+  | Mode of Mode.Value.error
+
+exception Dont_match of value_mismatch
+
+type close_over_coercion = Env.locks * Longident.t * Location.t
+
+type mmodes =
+  | All
+  | Specific of Mode.Value.l * Mode.Value.r * close_over_coercion option
+
+let child_close_over_coercion_opt id c =
+  match c with
+  | None -> None
+  | Some (locks, lid, loc) -> Some (locks, Longident.Ldot (lid, id), loc)
+
+let child_modes id = function
+  | All -> All
+  | Specific (m0, m1, c) ->
+    let c = child_close_over_coercion_opt id c in
+    Specific (m0, m1, c)
+
+let child_modes_with_modalities id ~modalities:(moda0, moda1) = function
+  | All ->
+    begin match Mode.Modality.sub moda0 moda1 with
+      | Ok () -> Ok All
+      | Error e -> Error e
+    end
+  | Specific (m0, m1, c) ->
+    let c = child_close_over_coercion_opt id c in
+    begin match Mode.Modality.to_const_opt moda1 with
+    | None ->
+      (* [wrap_constraint_with_shape] invokes inclusion check with
+          identical modes and inferred modalities, which we workaround *)
+      assert (moda0 == moda1);
+      Mode.Value.submode_exn m0 m1;
+      (* For children, we only check modality inclusion *)
+      Ok All
+    | Some moda1 ->
+      let m0 = Mode.Modality.apply moda0 m0 in
+      let m1 = Mode.Modality.Const.apply moda1 m1 in
+      Ok (Specific (m0, m1, c))
+    end
+
+let check_modes env ?(crossing = Crossing.max) ~item ?typ = function
+  | All -> Ok ()
+  | Specific (m0, m1, c) ->
+      let m0 =
+        match c with
+        | None -> m0
+        | Some (locks, lid, loc) ->
+            let m0 = Crossing.apply_left crossing m0 in
+            let m0 = Env.walk_locks ~env ~loc lid ~item typ (m0, locks) in
+            m0.mode
+      in
+      let m1 = Crossing.apply_right crossing m1 in
+      Mode.Value.submode m0 m1
 
 let native_repr_args nra1 nra2 =
   let rec loop i nra1 nra2 =
@@ -38,7 +106,7 @@ let native_repr_args nra1 nra2 =
     | [], [] -> None
     | [], _ :: _ -> assert false
     | _ :: _, [] -> assert false
-    | nr1 :: nra1, nr2 :: nra2 ->
+    | (_, nr1) :: nra1, (_, nr2) :: nra2 ->
       if not (Primitive.equal_native_repr nr1 nr2) then Some (Argument_repr i)
       else loop (i+1) nra1 nra2
   in
@@ -54,43 +122,29 @@ let primitive_descriptions pd1 pd2 =
     Some (No_alloc First)
   else if pd1.prim_alloc && (not pd2.prim_alloc) then
     Some (No_alloc Second)
+  else if not
+    (Bool.equal pd1.prim_is_layout_poly
+                pd2.prim_is_layout_poly) then
+    Some Layout_poly_attr
+  else if not (Bool.equal pd1.prim_c_builtin pd2.prim_c_builtin) then
+    Some Builtin
+  else if not (Primitive.equal_effects pd1.prim_effects pd2.prim_effects) then
+    Some Effects
+  else if not
+    (Primitive.equal_coeffects
+       pd1.prim_coeffects pd2.prim_coeffects) then
+    Some Coeffects
   else if not (String.equal pd1.prim_native_name pd2.prim_native_name) then
     Some Native_name
   else if not
-    (Primitive.equal_native_repr
-       pd1.prim_native_repr_res pd2.prim_native_repr_res) then
+    (match pd1.prim_native_repr_res, pd2.prim_native_repr_res with
+      | (_, nr1), (_, nr2) -> Primitive.equal_native_repr nr1 nr2) then
     Some Result_repr
   else
     native_repr_args pd1.prim_native_repr_args pd2.prim_native_repr_args
 
-type value_mismatch =
-  | Primitive_mismatch of primitive_mismatch
-  | Not_a_primitive
-  | Type of Errortrace.moregen_error
-
-exception Dont_match of value_mismatch
-
-(* A value description [vd1] is consistent with the value description [vd2] if
-   there is a context E such that [E |- vd1 <: vd2] for the ordinary subtyping.
-   For values, this is the case as soon as the kind of [vd1] is a subkind of the
-   [vd2] kind. *)
-let value_descriptions_consistency env vd1 vd2 =
-  match (vd1.val_kind, vd2.val_kind) with
-  | (Val_prim p1, Val_prim p2) -> begin
-      match primitive_descriptions p1 p2 with
-      | None -> Tcoerce_none
-      | Some err -> raise (Dont_match (Primitive_mismatch err))
-    end
-  | (Val_prim p, _) ->
-      let pc =
-        { pc_desc = p; pc_type = vd2.Types.val_type;
-          pc_env = env; pc_loc = vd1.Types.val_loc; }
-      in
-      Tcoerce_primitive pc
-  | (_, Val_prim _) -> raise (Dont_match Not_a_primitive)
-  | (_, _) -> Tcoerce_none
-
 let value_descriptions ~loc env name
+    ~mmodes
     (vd1 : Types.value_description)
     (vd2 : Types.value_description) =
   Builtin_attributes.check_alerts_inclusion
@@ -99,9 +153,62 @@ let value_descriptions ~loc env name
     loc
     vd1.val_attributes vd2.val_attributes
     name;
-  match Ctype.moregeneral env true vd1.val_type vd2.val_type with
-  | exception Ctype.Moregen err -> raise (Dont_match (Type err))
-  | () -> value_descriptions_consistency env vd1 vd2
+  begin match Zero_alloc.sub vd1.val_zero_alloc vd2.val_zero_alloc with
+  | Ok () -> ()
+  | Error e -> raise (Dont_match (Zero_alloc e))
+  end;
+  let crossing = Ctype.crossing_of_ty env vd2.val_type in
+  let modalities = vd1.val_modalities, vd2.val_modalities in
+  let modes =
+    match child_modes_with_modalities name ~modalities mmodes with
+    | Ok modes -> modes
+    | Error e -> raise (Dont_match (Modality e))
+  in
+  begin match check_modes env ~crossing ~item:Value ~typ:vd1.val_type modes with
+  | Ok () -> ()
+  | Error e -> raise (Dont_match (Mode e))
+  end;
+  match vd1.val_kind with
+  | Val_prim p1 -> begin
+     match vd2.val_kind with
+     | Val_prim p2 -> begin
+         let locality = [ Mode.Locality.global; Mode.Locality.local ] in
+         let yielding = [ Mode.Yielding.unyielding; Mode.Yielding.yielding ] in
+         List.iter (fun loc ->
+           List.iter (fun yield ->
+             let ty1, _, _, _ = Ctype.instance_prim p1 vd1.val_type in
+             let ty2, mode_l2, mode_y2, _ = Ctype.instance_prim p2 vd2.val_type in
+             Option.iter (Mode.Locality.equate_exn loc) mode_l2;
+             Option.iter (Mode.Yielding.equate_exn yield) mode_y2;
+             try
+               Ctype.moregeneral env true ty1 ty2
+             with Ctype.Moregen err ->
+               raise (Dont_match (Type err))
+           ) yielding
+         ) locality;
+         match primitive_descriptions p1 p2 with
+         | None -> Tcoerce_none
+         | Some err -> raise (Dont_match (Primitive_mismatch err))
+       end
+     | _ ->
+        let ty1, mode_l1, _, sort1 = Ctype.instance_prim p1 vd1.val_type in
+        (try Ctype.moregeneral env true ty1 vd2.val_type
+         with Ctype.Moregen err -> raise (Dont_match (Type err)));
+        let pc =
+          {pc_desc = p1; pc_type = vd2.Types.val_type;
+           pc_poly_mode = Option.map Mode.Locality.disallow_right mode_l1;
+           pc_poly_sort=sort1;
+           pc_env = env; pc_loc = vd1.Types.val_loc; } in
+        Tcoerce_primitive pc
+     end
+  | _ ->
+     match Ctype.moregeneral env true vd1.val_type vd2.val_type with
+     | exception Ctype.Moregen err -> raise (Dont_match (Type err))
+     | () -> begin
+       match vd2.val_kind with
+         | Val_prim _ -> raise (Dont_match Not_a_primitive)
+         | _ -> Tcoerce_none
+     end
 
 (* Inclusion between manifest types (particularly for private row types) *)
 
@@ -135,19 +242,22 @@ type privacy_mismatch =
   | Private_type_abbreviation
   | Private_variant_type
   | Private_record_type
+  | Private_record_unboxed_product_type
   | Private_extensible_variant
   | Private_row_type
 
 type type_kind =
   | Kind_abstract
   | Kind_record
+  | Kind_record_unboxed_product
   | Kind_variant
   | Kind_open
 
 let of_kind = function
   | Type_abstract _ -> Kind_abstract
-  | Type_record (_, _) -> Kind_record
-  | Type_variant (_, _) -> Kind_variant
+  | Type_record (_, _, _) -> Kind_record
+  | Type_record_unboxed_product (_, _, _) -> Kind_record_unboxed_product
+  | Type_variant (_, _, _) -> Kind_variant
   | Type_open -> Kind_open
 
 type kind_mismatch = type_kind * type_kind
@@ -155,6 +265,8 @@ type kind_mismatch = type_kind * type_kind
 type label_mismatch =
   | Type of Errortrace.equality_error
   | Mutability of position
+  | Atomicity of position
+  | Modality of Modality.equate_error
 
 type record_change =
   (Types.label_declaration, Types.label_declaration, label_mismatch)
@@ -162,7 +274,11 @@ type record_change =
 
 type record_mismatch =
   | Label_mismatch of record_change list
-  | Unboxed_float_representation of position
+  | Inlined_representation of position
+  | Float_representation of position
+  | Ufloat_representation of position
+  | Mixed_representation of position
+  | Mixed_representation_with_flat_floats of position
 
 type constructor_mismatch =
   | Type of Errortrace.equality_error
@@ -170,6 +286,7 @@ type constructor_mismatch =
   | Inline_record of record_change list
   | Kind of position
   | Explicit_return_type of position
+  | Modality of int * Modality.equate_error
 
 type extension_constructor_mismatch =
   | Constructor_privacy
@@ -193,19 +310,55 @@ type variant_change =
   (Types.constructor_declaration as 'l, 'l, constructor_mismatch)
     Diffing_with_keys.change
 
+type unsafe_mode_crossing_mismatch =
+  | Mode_crossing_only_on of position
+  | Bounds_not_equal of unsafe_mode_crossing * unsafe_mode_crossing
+
 type type_mismatch =
   | Arity
   | Privacy of privacy_mismatch
   | Kind of kind_mismatch
   | Constraint of Errortrace.equality_error
   | Manifest of Errortrace.equality_error
+  | Parameter_jkind of type_expr * Jkind.Violation.t
   | Private_variant of type_expr * type_expr * private_variant_mismatch
   | Private_object of type_expr * type_expr * private_object_mismatch
   | Variance
   | Record_mismatch of record_mismatch
   | Variant_mismatch of variant_change list
-  | Unboxed_representation of position
-  | Immediate of Type_immediacy.Violation.t
+  | Unboxed_representation of position * attributes
+  | Extensible_representation of position
+  | With_null_representation of position
+  | Jkind of Jkind.Violation.t
+  | Unsafe_mode_crossing of unsafe_mode_crossing_mismatch
+
+let report_modality_sub_error first second ppf e =
+  let Modality.Error (ax, {left; right}) = e in
+  let print_modality id ppf m =
+    Printtyp.modality ~id:(fun ppf -> Format.pp_print_string ppf id) ax ppf m
+  in
+  Format.fprintf ppf "%s is %a and %s is %a."
+    (String.capitalize_ascii second)
+    (print_modality "empty") right
+    first
+    (print_modality "not") left
+
+let report_mode_sub_error got expected ppf e =
+  let Mode.Value.Error(ax, {left; right}) = Mode.Value.to_simple_error e in
+  match ax with
+  | Comonadic Areality -> Format.fprintf ppf "This escapes its region."
+  | _ ->
+    Format.fprintf ppf "%s %a but %s %a."
+      (String.capitalize_ascii got)
+      (Misc.Style.as_inline_code (Value.Const.print_axis ax)) left
+      expected
+      (Misc.Style.as_inline_code (Value.Const.print_axis ax)) right
+
+let report_modality_equate_error first second ppf
+  ((equate_step, sub_error) : Modality.equate_error) =
+  match equate_step with
+  | Left_le_right -> report_modality_sub_error first second ppf sub_error
+  | Right_le_left -> report_modality_sub_error second first ppf sub_error
 
 module Style = Misc.Style
 module Fmt = Format_doc
@@ -223,6 +376,12 @@ let report_primitive_mismatch first second ppf err =
         (String.capitalize_ascii (choose ord first second))
         Style.inline_code "[@@noalloc]"
         (choose_other ord first second)
+  | Builtin ->
+      pr "The two primitives differ in whether they are builtins"
+  | Effects ->
+      pr "The two primitives have different effect annotations"
+  | Coeffects ->
+      pr "The two primitives have different coeffect annotations"
   | Native_name ->
       pr "The native names of the primitives are not the same"
   | Result_repr ->
@@ -230,6 +389,8 @@ let report_primitive_mismatch first second ppf err =
   | Argument_repr n ->
       pr "The two primitives' %d%s arguments have different representations"
         n (Misc.ordinal_suffix n)
+  | Layout_poly_attr ->
+      pr "The two primitives have different [@@layout_poly] attributes"
 
 let report_value_mismatch first second env ppf err =
   let pr fmt = Fmt.fprintf ppf fmt in
@@ -240,10 +401,15 @@ let report_value_mismatch first second env ppf err =
   | Not_a_primitive ->
       pr "The implementation is not a primitive."
   | Type trace ->
-      let msg = Fmt.Doc.msg in
-      Errortrace_report.moregen ppf Type_scheme env trace
-        (msg "The type")
-        (msg "is not compatible with the type")
+      Printtyp.report_moregen_error ppf Type_scheme env trace
+        (fun ppf -> Format.fprintf ppf "The type")
+        (fun ppf -> Format.fprintf ppf "is not compatible with the type")
+  | Zero_alloc e -> Zero_alloc.print_error ppf e
+  | Modality e -> report_modality_sub_error first second ppf e
+  | Mode e ->
+      let got = first ^ " is" in
+      let expected = second ^ " is" in
+      report_mode_sub_error got expected ppf e
 
 let report_type_inequality env ppf err =
   let msg = Fmt.Doc.msg in
@@ -257,6 +423,7 @@ let report_privacy_mismatch ppf err =
     | Private_type_abbreviation  -> true,  "type abbreviation"
     | Private_variant_type       -> false, "variant constructor(s)"
     | Private_record_type        -> true,  "record constructor"
+    | Private_record_unboxed_product_type -> true, "unboxed record constructor"
     | Private_extensible_variant -> true,  "extensible variant"
     | Private_row_type           -> true,  "row type"
   in Format_doc.fprintf ppf "%s %s would be revealed."
@@ -271,6 +438,11 @@ let report_label_mismatch first second env ppf err =
       Format_doc.fprintf ppf "%s is mutable and %s is not."
         (String.capitalize_ascii (choose ord first second))
         (choose_other ord first second)
+  | Atomicity ord ->
+      Format.fprintf ppf "%s is atomic and %s is not."
+        (String.capitalize_ascii (choose ord first second))
+        (choose_other ord first second)
+  | Modality err_ -> report_modality_equate_error first second ppf err_
 
 let pp_record_diff first second prefix decl env ppf (x : record_change) =
   match x with
@@ -321,10 +493,31 @@ let report_record_mismatch first second decl env ppf err =
   match err with
   | Label_mismatch patch ->
       report_patch pp_record_diff first second decl env ppf patch
-  | Unboxed_float_representation ord ->
+  | Inlined_representation ord ->
+      pr "@[<hv>Their internal representations differ:@ %s %s %s.@]"
+        (choose ord first second) decl
+        "is an inlined record"
+  | Float_representation ord ->
       pr "@[<hv>Their internal representations differ:@ %s %s %s.@]"
         (choose ord first second) decl
         "uses unboxed float representation"
+  | Ufloat_representation ord ->
+      (* CR layouts: This case should unreachable now.  But it may be reachable
+         when we allow [any] types in structure declarations, using an example
+         like the "unboxed float representation" one in
+         [typing-unboxed-types/test.ml].  Add a test then. *)
+      pr "@[<hv>Their internal representations differ:@ %s %s %s.@]"
+        (choose ord first second) decl
+        "uses float# representation"
+  | Mixed_representation ord ->
+      (* CR layouts: As above. *)
+      pr "@[<hv>Their internal representations differ:@ %s %s %s.@]"
+        (choose ord first second) decl
+        "uses mixed representation"
+  | Mixed_representation_with_flat_floats ord ->
+      pr "@[<hv>Their internal representations differ:@ %s %s %s.@]"
+        (choose ord first second) decl
+        "uses a mixed representation where boxed floats are stored flat"
 
 let report_constructor_mismatch first second decl env ppf err =
   let pr fmt  = Fmt.fprintf ppf fmt in
@@ -341,6 +534,10 @@ let report_constructor_mismatch first second decl env ppf err =
       pr "%s has explicit return type and %s doesn't."
         (String.capitalize_ascii (choose ord first second))
         (choose_other ord first second)
+  | Modality (i, err) ->
+      pr "Modality mismatch at argument position %i:@ %a"
+        (i + 1) (report_modality_equate_error first second) err
+        (* argument position is one-based; more intuitive *)
 
 let pp_variant_diff first second prefix decl env ppf (x : variant_change) =
   match x with
@@ -422,6 +619,7 @@ let report_kind_mismatch first second ppf (kind1, kind2) =
   let kind_to_string = function
   | Kind_abstract -> "abstract"
   | Kind_record -> "a record"
+  | Kind_record_unboxed_product -> "an unboxed record"
   | Kind_variant -> "a variant"
   | Kind_open -> "an extensible variant" in
   pr "%s is %s, but %s is %s."
@@ -429,6 +627,28 @@ let report_kind_mismatch first second ppf (kind1, kind2) =
     (kind_to_string kind1)
     second
     (kind_to_string kind2)
+
+let print_unsafe_mode_crossing ppf umc =
+  Format.fprintf ppf "mod %a@ %a"
+    Mode.Crossing.print umc.unsafe_mod_bounds
+    Jkind.With_bounds.format umc.unsafe_with_bounds
+
+let report_unsafe_mode_crossing_mismatch first second ppf e =
+  let pr fmt = Format.fprintf ppf fmt in
+  match e with
+  | Mode_crossing_only_on ord ->
+    pr "%s has [%@%@unsafe_allow_any_mode_crossing], but %s does not"
+      (choose ord first second)
+      (choose_other ord first second)
+  | Bounds_not_equal (first_umc, second_umc) ->
+    (* CR layouts v2.8: It'd be nice to specifically highlight the offending axis,
+       rather than printing all axes here. Internal ticket 5094. *)
+    pr "Both specify [%@%@unsafe_allow_any_mode_crossing], but their \
+        bounds are not equal@,\
+        @[%s has:@ %a@]@ \
+        @[but %s has:@ %a@]"
+      first print_unsafe_mode_crossing first_umc
+      second print_unsafe_mode_crossing second_umc
 
 let report_type_mismatch first second decl env ppf err =
   let pr fmt = Fmt.fprintf ppf fmt in
@@ -444,10 +664,14 @@ let report_type_mismatch first second decl env ppf err =
       (* This error can come from implicit parameter disagreement or from
          explicit `constraint`s.  Both affect the parameters, hence this choice
          of explanatory text *)
-      pr "Their parameters differ@,";
+      pr "Their parameters differ:@,";
       report_type_inequality env ppf err
   | Manifest err ->
       report_type_inequality env ppf err
+  | Parameter_jkind (ty, v) ->
+      pr "The problem is in the kinds of a parameter:@,";
+      Jkind.Violation.report_with_offender
+        ~offender:(fun pp -> Printtyp.type_expr pp ty) ppf v
   | Private_variant (_ty1, _ty2, mismatch) ->
       report_private_variant_mismatch first second decl env ppf mismatch
   | Private_object (_ty1, _ty2, mismatch) ->
@@ -458,35 +682,84 @@ let report_type_mismatch first second decl env ppf err =
       report_record_mismatch first second decl env ppf err
   | Variant_mismatch err ->
       report_patch pp_variant_diff first second decl env ppf err
-  | Unboxed_representation ord ->
+  | Unboxed_representation (ord, attrs) ->
       pr "Their internal representations differ:@ %s %s %s."
          (choose ord first second) decl
-         "uses unboxed representation"
-  | Immediate violation ->
-      let first = StringLabels.capitalize_ascii first in
-      match violation with
-      | Type_immediacy.Violation.Not_always_immediate ->
-          pr "%s is not an immediate type." first
-      | Type_immediacy.Violation.Not_always_immediate_on_64bits ->
-          pr "%s is not a type that is always immediate on 64 bit platforms."
-            first
+         "uses unboxed representation";
+      if Builtin_attributes.has_unboxed attrs then
+        pr "@ Hint: %s %s has [%@unboxed]. Did you mean [%@%@unboxed]?"
+          (choose ord second first) decl
+  | Extensible_representation ord ->
+      pr "Their internal representations differ:@ %s %s %s."
+         (choose ord first second) decl
+         "is extensible"
+  | With_null_representation ord ->
+      pr "Their internal representations differ:@ %s %s %s."
+         (choose ord first second) decl
+         "has a constructor represented as a null pointer";
+      pr "@ Hint: add [%@%@or_null_reexport]."
+  | Jkind v ->
+      Jkind.Violation.report_with_name ~name:first ppf v
+  | Unsafe_mode_crossing mismatch ->
+    pr "They have different unsafe mode crossing behavior:@,@[<v 2>%a@]"
+      (fun ppf (first, second, mismatch) ->
+         report_unsafe_mode_crossing_mismatch first second ppf mismatch)
+      (first, second, mismatch)
+
+let compare_unsafe_mode_crossing ~env umc1 umc2 =
+  match umc1, umc2 with
+  | None, None -> None
+  | Some _, None -> Some (Unsafe_mode_crossing (Mode_crossing_only_on First))
+  | None, Some _ -> Some (Unsafe_mode_crossing (Mode_crossing_only_on Second))
+  | Some umc1, Some umc2 ->
+    if equal_unsafe_mode_crossing
+         ~type_equal:(Ctype.type_equal env)
+         umc1 umc2
+    then None
+    else
+      Some (
+        Unsafe_mode_crossing (
+          Bounds_not_equal (umc1, umc2)))
 
 module Record_diffing = struct
 
   let compare_labels env params1 params2
-      (ld1 : Types.label_declaration)
-      (ld2 : Types.label_declaration) =
-    if ld1.ld_mutable <> ld2.ld_mutable
-    then
-      let ord = if ld1.ld_mutable = Asttypes.Mutable then First else Second in
-      Some (Mutability  ord)
-    else
-    let tl1 = params1 @ [ld1.ld_type] in
-    let tl2 = params2 @ [ld2.ld_type] in
-    match Ctype.equal env true tl1 tl2 with
-    | exception Ctype.Equality err ->
-        Some (Type err : label_mismatch)
-    | () -> None
+        (ld1 : Types.label_declaration)
+        (ld2 : Types.label_declaration) =
+        let err =
+          match ld1.ld_mutable, ld2.ld_mutable with
+          | Immutable, Immutable -> None
+          | Mutable _, Immutable -> Some (Mutability First)
+          | Immutable, Mutable _ -> Some (Mutability Second)
+          | Mutable { mode = m1; atomic = atomic1 },
+            Mutable { mode = m2; atomic = atomic2 } ->
+            begin match atomic1, atomic2 with
+            | Atomic, Nonatomic -> Some (Atomicity First)
+            | Nonatomic, Atomic -> Some (Atomicity Second)
+            | Atomic, Atomic | Nonatomic, Nonatomic ->
+                let open Mode.Value.Comonadic in
+                equate_exn m1 legacy;
+                equate_exn m2 legacy;
+                None
+            end
+        in
+        begin match err with
+        | Some err -> Some err
+        | None ->
+          match Modality.Const.equate ld1.ld_modalities ld2.ld_modalities with
+          | Ok () ->
+            let tl1 = params1 @ [ld1.ld_type] in
+            let tl2 = params2 @ [ld2.ld_type] in
+            begin
+            (* Allow renaming: this gets called for inline records in GADT
+               constructors that may have existentials. *)
+            match Ctype.equal env true tl1 tl2 with
+            | exception Ctype.Equality err ->
+                Some (Type err : label_mismatch)
+            | () -> None
+            end
+          | Error e -> Some (Modality e : label_mismatch)
+        end
 
   let rec equal ~loc env params1 params2
       (labels1 : Types.label_declaration list)
@@ -601,32 +874,90 @@ module Record_diffing = struct
     else
       Some (diffing loc env params1 params2 l r)
 
+  let find_mismatch_in_mixed_record_representations
+      (s1 : mixed_product_shape) (s2 : mixed_product_shape)
+    =
+    if s1 = s2 then None
+    else
+      let has_float_boxed_on_read fields =
+        Array.exists (function
+            | Float_boxed -> true
+            | _ -> false)
+          fields
+      in
+      if has_float_boxed_on_read s1
+      then Some (Mixed_representation_with_flat_floats First)
+      else if has_float_boxed_on_read s2
+      then Some (Mixed_representation_with_flat_floats Second)
+      else
+        Misc.fatal_error
+          "Impossible: the only way for mixed blocks to differ in \
+           representation is if one is a flat float record with a boxed float \
+           field, and the other isn't."
 
-  let compare_with_representation ~loc env params1 params2 l r rep1 rep2 =
+  let compare_with_representation (type rep) ~loc
+        (record_form : rep record_form) env params1 params2 l r
+        (rep1 : rep) (rep2 : rep) =
     if not (equal ~loc env params1 params2 l r) then
       let patch = diffing loc env params1 params2 l r in
       Some (Record_mismatch (Label_mismatch patch))
     else
-     match rep1, rep2 with
-     | Record_unboxed _, Record_unboxed _ -> None
-     | Record_unboxed _, _ -> Some (Unboxed_representation First)
-     | _, Record_unboxed _ -> Some (Unboxed_representation Second)
+      match record_form with
+      | Legacy ->
+        begin match rep1, rep2 with
+        | Record_unboxed, Record_unboxed -> None
+        | Record_unboxed, _ -> Some (Unboxed_representation (First, []))
+        | _, Record_unboxed -> Some (Unboxed_representation (Second, []))
 
-     | Record_float, Record_float -> None
-     | Record_float, _ ->
-        Some (Record_mismatch (Unboxed_float_representation First))
-     | _, Record_float ->
-        Some (Record_mismatch (Unboxed_float_representation Second))
+        | Record_inlined _, Record_inlined _ -> None
+        | Record_inlined _, _ ->
+           Some (Record_mismatch (Inlined_representation First))
+        | _, Record_inlined _ ->
+           Some (Record_mismatch (Inlined_representation Second))
 
-     | Record_regular, Record_regular
-     | Record_inlined _, Record_inlined _
-     | Record_extension _, Record_extension _ -> None
-     | (Record_regular|Record_inlined _|Record_extension _),
-       (Record_regular|Record_inlined _|Record_extension _) ->
-        assert false
+        | Record_float, Record_float -> None
+        | Record_float, _ ->
+           Some (Record_mismatch (Float_representation First))
+        | _, Record_float ->
+           Some (Record_mismatch (Float_representation Second))
 
+        | Record_ufloat, Record_ufloat -> None
+        | Record_ufloat, _ ->
+           Some (Record_mismatch (Ufloat_representation First))
+        | _, Record_ufloat ->
+           Some (Record_mismatch (Ufloat_representation Second))
+
+        | Record_mixed m1, Record_mixed m2 ->
+            begin match find_mismatch_in_mixed_record_representations m1 m2 with
+            | None -> None
+            | Some mismatch -> Some (Record_mismatch mismatch)
+            end
+        | Record_mixed _, _ ->
+           Some (Record_mismatch (Mixed_representation First))
+        | _, Record_mixed _ ->
+           Some (Record_mismatch (Mixed_representation Second))
+
+        | Record_boxed _, Record_boxed _ -> None
+        end
+      | Unboxed_product ->
+        begin match rep1, rep2 with
+        | Record_unboxed_product, Record_unboxed_product -> None
+        end
 end
 
+(* just like List.find_map, but also gives index if found *)
+let rec find_map_idx f ?(off = 0) l =
+  match l with
+  | [] -> None
+  | x :: xs -> begin
+      match f x with
+      | None -> find_map_idx f ~off:(off+1) xs
+      | Some y -> Some (off, y)
+    end
+
+let get_error = function
+  | Ok () -> None
+  | Error e -> Some e
 
 module Variant_diffing = struct
 
@@ -636,11 +967,21 @@ module Variant_diffing = struct
         if List.length arg1 <> List.length arg2 then
           Some (Arity : constructor_mismatch)
         else begin
-        (* Ctype.equal must be called on all arguments at once, cf. PR#7378 *)
-        match Ctype.equal env true (params1 @ arg1) (params2 @ arg2) with
-        | exception Ctype.Equality err -> Some (Type err)
-        | () -> None
-      end
+          let type_and_mode (ca : Types.constructor_argument) = ca.ca_type, ca.ca_modalities in
+          let arg1_tys, arg1_gfs = List.split (List.map type_and_mode arg1)
+          and arg2_tys, arg2_gfs = List.split (List.map type_and_mode arg2)
+          in
+          (* Ctype.equal must be called on all arguments at once, cf. PR#7378 *)
+          (* Allow renaming: in the GADT case, these arguments are distinct from
+             type parameters (which have been unified). See also
+             Note [Contravariance of type parameter jkinds]. *)
+          match Ctype.equal env true (params1 @ arg1_tys) (params2 @ arg2_tys) with
+          | exception Ctype.Equality err -> Some (Type err)
+          | () -> List.combine arg1_gfs arg2_gfs
+                  |> find_map_idx
+                    (fun (x,y) -> get_error @@ Modality.Const.equate x y)
+                  |> Option.map (fun (i, err) -> Modality (i, err))
+        end
     | Types.Cstr_record l1, Types.Cstr_record l2 ->
         Option.map
           (fun rec_err -> Inline_record rec_err)
@@ -651,8 +992,13 @@ module Variant_diffing = struct
   let compare_constructors ~loc env params1 params2 res1 res2 args1 args2 =
     match res1, res2 with
     | Some r1, Some r2 ->
+        (* Allow renaming here: variables in GADT-syntax constructors are
+           distinct from the variables in type parameters *)
         begin match Ctype.equal env true [r1] [r2] with
         | exception Ctype.Equality err -> Some (Type err)
+              (* Pass the result types in this call to
+                 [compare_constructor_arguments], so that the call to [Ctype.equal]
+                 can see the entire scope of the variables *)
         | () -> compare_constructor_arguments ~loc env [r1] [r2] args1 args2
         end
     | Some _, None -> Some (Explicit_return_type First)
@@ -742,16 +1088,30 @@ module Variant_diffing = struct
       cstrs1 cstrs2 rep1 rep2
     =
     let err = compare ~loc env params1 params2 cstrs1 cstrs2 in
+    let attrs_of_only cstrs =
+      match cstrs with
+      | [cstr] -> cstr.Types.cd_attributes
+      | _ -> []
+    in
     match err, rep1, rep2 with
-    | None, Variant_regular, Variant_regular
-    | None, Variant_unboxed, Variant_unboxed ->
-        None
+    | None, Variant_unboxed, Variant_unboxed
+    | None, Variant_boxed _, Variant_boxed _
+    | None, Variant_extensible, Variant_extensible
+    | None, Variant_with_null, Variant_with_null -> None
     | Some err, _, _ ->
         Some (Variant_mismatch err)
-    | None, Variant_unboxed, Variant_regular ->
-        Some (Unboxed_representation First)
-    | None, Variant_regular, Variant_unboxed ->
-        Some (Unboxed_representation Second)
+    | None, Variant_unboxed, Variant_boxed _ ->
+        Some (Unboxed_representation (First, attrs_of_only cstrs2))
+    | None, Variant_boxed _, Variant_unboxed ->
+        Some (Unboxed_representation (Second, attrs_of_only cstrs1))
+    | None, Variant_extensible, _ ->
+      Some (Extensible_representation First)
+    | None, _, Variant_extensible ->
+      Some (Extensible_representation Second)
+    | None, Variant_with_null, _ ->
+      Some (With_null_representation First)
+    | None, _, Variant_with_null ->
+      Some (With_null_representation Second)
 end
 
 (* Inclusion between "private" annotations *)
@@ -760,6 +1120,8 @@ let privacy_mismatch env decl1 decl2 =
   | Private, Public -> begin
       match decl1.type_kind, decl2.type_kind with
       | Type_record  _, Type_record  _ -> Some Private_record_type
+      | Type_record_unboxed_product  _, Type_record_unboxed_product  _ ->
+          Some Private_record_unboxed_product_type
       | Type_variant _, Type_variant _ -> Some Private_variant_type
       | Type_open,      Type_open      -> Some Private_extensible_variant
       | Type_abstract _, Type_abstract _
@@ -786,7 +1148,7 @@ let privacy_mismatch env decl1 decl2 =
   | _, _ ->
       None
 
-let private_variant env row1 params1 row2 params2 =
+let private_variant env row1 row2 =
     let r1, r2, pairs =
       Ctype.merge_row_fields (row_fields row1) (row_fields row2)
     in
@@ -819,7 +1181,7 @@ let private_variant env row1 params1 row2 params2 =
     let rec loop tl1 tl2 pairs =
       match pairs with
       | [] -> begin
-          match Ctype.equal env true tl1 tl2 with
+          match Ctype.equal env false tl1 tl2 with
           | exception Ctype.Equality err ->
               Some (Types err : private_variant_mismatch)
           | () -> None
@@ -858,9 +1220,9 @@ let private_variant env row1 params1 row2 params2 =
               Some (Missing (First, s) : private_variant_mismatch)
         end
     in
-    loop params1 params2 pairs
+    loop [] [] pairs
 
-let private_object env fields1 params1 fields2 params2 =
+let private_object env fields1 fields2 =
   let pairs, _miss1, miss2 = Ctype.associate_fields fields1 fields2 in
   let err =
     match miss2 with
@@ -872,18 +1234,18 @@ let private_object env fields1 params1 fields2 params2 =
     List.split (List.map (fun (_,_,t1,_,t2) -> t1, t2) pairs)
   in
   begin
-    match Ctype.equal env true (params1 @ tl1) (params2 @ tl2) with
+    match Ctype.equal env false tl1 tl2 with
     | exception Ctype.Equality err -> Some (Types err)
     | () -> None
   end
 
-let type_manifest env ty1 params1 ty2 params2 priv2 kind2 =
+let type_manifest env ty1 ty2 priv2 kind2 =
   let ty1' = Ctype.expand_head env ty1 and ty2' = Ctype.expand_head env ty2 in
   match get_desc ty1', get_desc ty2' with
   | Tvariant row1, Tvariant row2
     when is_absrow env (row_more row2) -> begin
-      assert (Ctype.is_equal env true (ty1::params1) (row_more row2::params2));
-      match private_variant env row1 params1 row2 params2 with
+      assert (Ctype.is_equal env false [ty1] [row_more row2]);
+      match private_variant env row1 row2 with
       | None -> None
       | Some err -> Some (Private_variant(ty1, ty2, err))
     end
@@ -891,8 +1253,8 @@ let type_manifest env ty1 params1 ty2 params2 priv2 kind2 =
     when is_absrow env (snd (Ctype.flatten_fields fi2)) -> begin
       let (fields2,rest2) = Ctype.flatten_fields fi2 in
       let (fields1,_) = Ctype.flatten_fields fi1 in
-      assert (Ctype.is_equal env true (ty1::params1) (rest2::params2));
-      match private_object env fields1 params1 fields2 params2 with
+      assert (Ctype.is_equal env false [ty1] [rest2]);
+      match private_object env fields1 fields2 with
       | None -> None
       | Some err -> Some (Private_object(ty1, ty2, err))
     end
@@ -912,25 +1274,100 @@ let type_manifest env ty1 params1 ty2 params2 priv2 kind2 =
       in
       match
         if is_private_abbrev_2 then
-          Ctype.equal_private env params1 ty1 params2 ty2
+          Ctype.equal_private env ty1 ty2
         else
-          Ctype.equal env true (params1 @ [ty1]) (params2 @ [ty2])
+          Ctype.equal env false [ty1] [ty2]
       with
       | exception Ctype.Equality err -> Some (Manifest err)
       | () -> None
     end
 
-(* A type declarations [td1] is consistent with the type declaration [td2] if
-   there is a context E such E |- td1 <: td2 for the ordinary subtyping. For
-   types, this is the case as soon as the two type declarations share the same
-   arity and the privacy of [td1] is less than the privacy of [td2] (consider a
-   context E where all type constructors are equal). *)
-let type_declarations_consistency env decl1 decl2 =
-  if decl1.type_arity <> decl2.type_arity then Some Arity
-  else match privacy_mismatch env decl1 decl2 with
-    | Some err -> Some (Privacy err)
-    | None -> None
+(* Note [Contravariance of type parameter jkinds]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+   The goal of this function is to check whether every possible instantiation of
+   decl2 is also a valid instantiation of decl1. Ideally, we would just make
+   that check directly, by taking the type parameters of decl2, instantiating
+   them with fresh constants (throughout the manifest/kind of decl2), and then
+   unifying decl2 with an instance'd decl1. The problem with this approach is
+   that it is not upstream-compatible: upstream requires that the constraints of
+   decl1 and decl2 match exactly, even though this is more than is necessary for
+   soundness.
+
+   On the other hand, we really want to support contravariance of jkinds in type
+   parameters, to allow something like this:
+
+   {[
+     module F (X : sig type ('a : value) t ... end) = ...
+     module Array = struct type ('a : any) t ... end
+     module M = F(Array)
+   ]}
+
+   This is perfectly safe -- [F] will use [X.t] only with [value]s, which is
+   fine because [X.t] works with [any] type -- but requires contravariance.
+
+   So this is our approach:
+
+   1. Check the type parameters for equality (allowing renaming), but skipping
+   any jkind checks. We must allow renaming because the decls will bind separate
+   variables, and we skip the jkind checks precisely because we don't wish to
+   require the jkinds be equal.
+
+   2. Copy the two declarations. This allows us to unify parts of the copies
+   without affecting the originals. We use [generic_instance_declaration]
+   instead of [instance_declaration] because generic variables are not treated
+   as weakly polymorphic by the pretty printer. That's the only reason to be
+   generic here: levels simply don't matter in this bit.
+
+   3. Rigidify the type parameters of decl2. We want to make sure any possible
+   instantiation of decl2 is a legal instantiation of decl1, so if unification
+   affects the type parameters of decl2, that's an error. (Alternative: we could
+   reify instead of rigidify. But rigidify seems simpler, given that it does not
+   need to extend the env.)
+
+   (Perhaps surprisingly, rigidify does not actually make things rigid. Instead,
+   it remembers the variables free in a type and then can check after a
+   unification to see whether any of them changed. This check is Step 6 in this
+   Note.)
+
+   4. Unify the type parameters of decl1 and decl2. This unification can fail
+   only by a jkind problem: anything else would have been caught by the equality
+   check in Step 1. An outright jkind problem will raise [Unify], and this gets
+   reported to the user. To format the error message well, we can safely search
+   only for a [Bad_jkind] event; it has to be there somewhere. There also might
+   be a jkind mismatch which causes the jkind of a variable in decl2 to be
+   lowered; this gets caught by the call to [all_distinct_vars_with_original_jkinds]
+   in Step 6.
+
+   5. Check the type definitions. This includes doing all the checks on both the
+   manifest and the kind. These checks use Ctype.equal. Importantly, this happens
+   *after* unifying the type parameters, allowing an example like
+
+   {[
+     module M : sig
+       type ('a : value) t = 'a
+     end = struct
+       type ('a : any) t = 'a
+     end
+   ]}
+
+   A naive check that the jkind of the structure's [t] is less than that of the
+   sig's [t] would fail: the structure's [t] has jkind [any] while the sig has
+   jkind [value]. But it's actually all OK: because we have unified the parameters,
+   the jkind of the struct will be [value], and then we'll check that [value]
+   is a subjkind of [value], and the definition will be accepted.
+
+   One worry might be about existential variables. Might they get unified? No.
+   These, by definition, do not appear in the type parameters. And because all
+   checks on the type definition bodies are done with [Ctype.equal], we know the
+   existentials will remain untouched.
+
+   6. Call [all_distinct_vars_with_original_jkinds]. This is the counterpart to
+   Step 3 that checks that none of the type variables in decl2 needed to have
+   their jkinds changed during unification.
+   *)
+
+(* See Note [Contravariance of type parameter jkinds]. *)
 let type_declarations ?(equality = false) ~loc env ~mark name
       decl1 path decl2 =
   Builtin_attributes.check_alerts_inclusion
@@ -939,36 +1376,102 @@ let type_declarations ?(equality = false) ~loc env ~mark name
     loc
     decl1.type_attributes decl2.type_attributes
     name;
-  let err = type_declarations_consistency env decl1 decl2 in
+  if decl1.type_arity <> decl2.type_arity then Some Arity else
+  (* Step 1 from the Note *)
+  let err =
+    match Ctype.equal ~do_jkind_check:false env true
+            decl1.type_params decl2.type_params with
+    | exception Ctype.Equality err -> Some (Constraint err)
+    | () -> None
+  in
+  if err <> None then err else
+  (* Step 2 from the Note *)
+  let decl1 = Ctype.generic_instance_declaration decl1 in
+  let decl2 = Ctype.generic_instance_declaration decl2 in
+  (* Step 3 from the Note *)
+  let rigidity_info = Ctype.Rigidify.rigidify_list decl2.type_params in
+  (* Step 4 from the Note *)
+  let err =
+    match
+      List.iter2 (Ctype.unify env) decl1.type_params decl2.type_params
+    with
+      | exception Ctype.Unify err ->
+        let get_jkind_violation = function
+          | Errortrace.Bad_jkind (ty, v) -> Some (Parameter_jkind (ty, v))
+          | _ -> None
+        in
+        begin match List.find_map get_jkind_violation err.trace with
+        | Some _ as err -> err
+        | None -> Misc.fatal_errorf
+                    "Unification in type_declarations failed, \
+                     but not with Bad_jkind:@;<1 2>%t"
+              (fun ppf -> Printtyp.report_unification_error ppf env err
+               (fun ppf -> Format.fprintf ppf "The type")
+               (fun ppf -> Format.fprintf ppf "does not unify with the type"))
+        end
+      | () -> None
+  in
+  if err <> None then err else
+  (* Step 5 from the Note *)
+  let err =
+    match privacy_mismatch env decl1 decl2 with
+    | Some err -> Some (Privacy err)
+    | None -> None
+  in
   if err <> None then err else
   let err = match (decl1.type_manifest, decl2.type_manifest) with
-      (_, None) ->
-        begin
-          match Ctype.equal env true decl1.type_params decl2.type_params with
-          | exception Ctype.Equality err -> Some (Constraint err)
-          | () -> None
-        end
+      (_, None) -> None
     | (Some ty1, Some ty2) ->
-         type_manifest env ty1 decl1.type_params ty2 decl2.type_params
-           decl2.type_private decl2.type_kind
+         type_manifest env ty1 ty2 decl2.type_private decl2.type_kind
     | (None, Some ty2) ->
         let ty1 =
           Btype.newgenty (Tconstr(path, decl2.type_params, ref Mnil))
         in
-        match Ctype.equal env true decl1.type_params decl2.type_params with
-        | exception Ctype.Equality err -> Some (Constraint err)
-        | () ->
-          match Ctype.equal env false [ty1] [ty2] with
-          | exception Ctype.Equality err -> Some (Manifest err)
-          | () -> None
+        match Ctype.equal env false [ty1] [ty2] with
+        | exception Ctype.Equality err -> Some (Manifest err)
+        | () -> None
   in
   if err <> None then err else
+  let mark_and_compare_records record_form labels1 rep1 labels2 rep2 =
+    if mark then begin
+      let mark usage lbls =
+        List.iter (fun lbl -> Env.mark_label_used usage lbl.Types.ld_uid) lbls
+      in
+      let usage : Env.label_usage =
+        if decl2.type_private = Public then Env.Exported
+        else Env.Exported_private
+      in
+      mark usage labels1;
+      if equality then mark Env.Exported labels2
+    end;
+    Record_diffing.compare_with_representation ~loc record_form env
+      decl1.type_params decl2.type_params
+      labels1 labels2
+      rep1 rep2
+  in
   let err = match (decl1.type_kind, decl2.type_kind) with
-      (_, Type_abstract _) -> None
-    | (Type_variant (cstrs1, rep1), Type_variant (cstrs2, rep2)) ->
+      (_, Type_abstract _) ->
+        (* No need to check jkinds if decl2 has a manifest; we've already
+           checked for type equality, above. Oddly, this is not just an
+           optimization; unconditionally checking jkinds causes a failure
+           around recursive modules (test case: shapes/recmodules.ml).
+           Richard spent several hours trying to understand what was going
+           on there (after the substitution in [Typemod.check_recmodule_inclusion],
+           there was a type_declaration whose [type_jkind] didn't match its
+           [type_manifest]), but just skipping this check when there is a
+           manifest fixes the problem. *)
+        if Option.is_none decl2.type_manifest then
+          (* Note that [decl2.type_jkind] is an upper bound *)
+          match Ctype.check_decl_jkind env decl1 decl2.type_jkind with
+           | Ok _ -> None
+           | Error v -> Some (Jkind v)
+        else None
+    | (Type_variant (cstrs1, rep1, umc1), Type_variant (cstrs2, rep2, umc2)) -> begin
         if mark then begin
           let mark usage cstrs =
-            List.iter (Env.mark_constructor_used usage) cstrs
+            List.iter (fun cstr ->
+              Env.mark_constructor_used usage cstr.Types.cd_uid
+            ) cstrs
           in
           let usage : Env.constructor_usage =
             if decl2.type_private = Public then Env.Exported
@@ -977,47 +1480,49 @@ let type_declarations ?(equality = false) ~loc env ~mark name
           mark usage cstrs1;
           if equality then mark Env.Exported cstrs2
         end;
-        Variant_diffing.compare_with_representation ~loc env
-          decl1.type_params
-          decl2.type_params
-          cstrs1
-          cstrs2
-          rep1
-          rep2
-    | (Type_record(labels1,rep1), Type_record(labels2,rep2)) ->
-        if mark then begin
-          let mark usage lbls =
-            List.iter (Env.mark_label_used usage) lbls
-          in
-          let usage : Env.label_usage =
-            if decl2.type_private = Public then Env.Exported
-            else Env.Exported_private
-          in
-          mark usage labels1;
-          if equality then mark Env.Exported labels2
-        end;
-        Record_diffing.compare_with_representation ~loc env
-          decl1.type_params decl2.type_params
-          labels1 labels2
-          rep1 rep2
+        Misc_stdlib.Option.first_some
+          (Variant_diffing.compare_with_representation ~loc env
+              decl1.type_params
+              decl2.type_params
+              cstrs1
+              cstrs2
+              rep1
+              rep2)
+          (fun () -> compare_unsafe_mode_crossing ~env umc1 umc2)
+      end
+    | (Type_record(labels1,rep1,umc1), Type_record(labels2,rep2,umc2)) -> begin
+        Misc_stdlib.Option.first_some
+          (mark_and_compare_records Legacy labels1 rep1 labels2 rep2)
+          (fun () -> compare_unsafe_mode_crossing ~env umc1 umc2)
+      end
+    | (Type_record_unboxed_product(labels1,rep1,umc1),
+       Type_record_unboxed_product(labels2,rep2,umc2)) -> begin
+        Misc_stdlib.Option.first_some
+          (mark_and_compare_records Unboxed_product labels1 rep1 labels2 rep2)
+          (fun () -> compare_unsafe_mode_crossing ~env umc1 umc2)
+      end
     | (Type_open, Type_open) -> None
     | (_, _) -> Some (Kind (of_kind decl1.type_kind, of_kind decl2.type_kind))
   in
   if err <> None then err else
+  (* Step 6 from the Note *)
+  match Ctype.Rigidify.all_distinct_vars_with_original_jkinds env rigidity_info with
+  | Unification_failure { name; ty }
+    (* This should be caught by the call to Ctype.equal above *)
+    -> Misc.fatal_errorf
+         "Unification failure in type inclusion rigidity check:@;\
+          %s unified with %a."
+         (match name with None -> "_" | Some n -> "'" ^ n)
+         Printtyp.type_expr ty
+  | Jkind_mismatch { original_jkind; inferred_jkind; ty } ->
+     let context = Ctype.mk_jkind_context_always_principal env in
+     Some (Parameter_jkind
+             (ty, Jkind.Violation.of_ ~context
+                    (Not_a_subjkind (Jkind.disallow_right original_jkind,
+                                     Jkind.disallow_left inferred_jkind,
+                                     []))))
+  | All_good ->
   let abstr = Btype.type_kind_is_abstract decl2 && decl2.type_manifest = None in
-  (* If attempt to assign a non-immediate type (e.g. string) to a type that
-   * must be immediate, then we error *)
-  let err =
-    if not abstr then
-      None
-    else
-      match
-        Type_immediacy.coerce decl1.type_immediate ~as_:decl2.type_immediate
-      with
-      | Ok () -> None
-      | Error violation -> Some (Immediate violation)
-  in
-  if err <> None then err else
   let need_variance =
     abstr || decl1.type_private = Private || decl1.type_kind = Type_open in
   if not need_variance then None else
@@ -1045,7 +1550,7 @@ let extension_constructors ~loc env ~mark id ext1 ext2 =
       if ext2.ext_private = Public then Env.Exported
       else Env.Exported_private
     in
-    Env.mark_extension_used usage ext1
+    Env.mark_extension_used usage ext1.ext_uid
   end;
   let ty1 =
     Btype.newgenty (Tconstr(ext1.ext_type_path, ext1.ext_type_params, ref Mnil))

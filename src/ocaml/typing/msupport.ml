@@ -52,7 +52,9 @@ let raise_error ?(ignore_unify = false) exn =
   end
   | None -> raise exn
 
-let () = Msupport_parsing.msupport_raise_error := raise_error
+let () =
+  Msupport_parsing.msupport_raise_error := raise_error;
+  Env.msupport_raise_error := raise_error
 
 exception Resume
 
@@ -87,8 +89,9 @@ let rec erroneous_expr_check e =
   erroneous_type_check e.Typedtree.exp_type
   ||
   match e.Typedtree.exp_desc with
-  | Typedtree.Texp_ident (p, _, _) when Ident.name (Path.head p) = "_" -> true
-  | Typedtree.Texp_apply (e', _) -> erroneous_expr_check e'
+  | Typedtree.Texp_ident (p, _, _, _, _) when Ident.name (Path.head p) = "_" ->
+    true
+  | Typedtree.Texp_apply (e', _, _, _, _) -> erroneous_expr_check e'
   | _ -> false
 
 exception Warning of Location.t * string

@@ -73,7 +73,7 @@ val map_end: ('a -> 'b) -> 'a list -> 'b list -> 'b list
        (** [map_end f l t] is [map f l @ t], just more efficient. *)
 
 val rev_map_end: ('a -> 'b) -> 'a list -> 'b list -> 'b list
-       (** [map_end f l t] is [map f (rev l) @ t], just more efficient. *)
+       (** [rev_map_end f l t] is [map f (rev l) @ t], just more efficient. *)
 
 val map_left_right: ('a -> 'b) -> 'a list -> 'b list
        (** Like [List.map], with guaranteed left-to-right evaluation order *)
@@ -114,14 +114,13 @@ val find_in_path: string list -> string -> string
 val find_in_path_rel: string list -> string -> string
        (** Search a relative file in a list of directories. *)
 
- (** Normalize file name [Foo.ml] to [foo.ml] *)
+(** Normalize file name [Foo.ml] to [foo.ml] *)
 val normalized_unit_filename: string -> string
 
 val find_in_path_normalized: ?fallback:string -> string list -> string -> string
 (** Same as {!find_in_path_rel} , but search also for normalized unit filename,
     i.e. if name is [Foo.ml], allow [/path/Foo.ml] and [/path/foo.ml] to
     match. *)
-
 
 val canonicalize_filename : ?cwd:string -> string -> string
         (* Ensure that path is absolute (wrt to cwd), by following ".." and "." *)
@@ -202,6 +201,8 @@ val letter_of_int : int -> string
 
 module Int_literal_converter : sig
   val int : string -> int
+  val int8 : string -> int
+  val int16 : string -> int
   val int32 : string -> int32
   val int64 : string -> int64
   val nativeint : string -> nativeint
@@ -330,6 +331,23 @@ val time_spent : unit -> float
     Sys.times/Unix.times.
     Both user and kernel cpu time is accounted.  *)
 
+module List : sig
+  include module type of List
+
+  (* merlin-jst: From the compiler's `Misc.Stdlib.List` *)
+  val is_prefix
+     : equal:('a -> 'a -> bool)
+    -> 'a list
+    -> of_:'a list
+    -> bool
+  (** Returns [true] if and only if the given list, with respect to the given
+      equality function on list members, is a prefix of the list [of_]. *)
+
+  val iteri2 : (int -> 'a -> 'b -> unit) -> 'a list -> 'b list -> unit
+  (** Same as {!List.iter2}, but the function is applied to the index of
+      the element as first argument (counting from 0) *)
+end
+
 module String : sig
   include module type of String
   module Map : Map.S with type key = t
@@ -425,55 +443,12 @@ end
 val print_see_manual : int list Format_doc.printer
 (** See manual section *)
 
+val output_of_print :
+  (Format.formatter -> 'a -> unit) -> out_channel -> 'a -> unit
+(** [output_of_print print] produces an output function from a pretty printer.
+    Note that naively using [Format.formatter_of_out_channel] typechecks but
+    doesn't work because it fails to flush the formatter. *)
 
-module Utf8_lexeme: sig
-  type t = string
-
-  val normalize: string -> (t,t) Result.t
-  (** Normalize the given UTF-8 encoded string.
-      Invalid UTF-8 sequences results in a error and are replaced
-      by U+FFFD.
-      Identifier characters are put in NFC normalized form.
-      Other Unicode characters are left unchanged. *)
-
-  val capitalize: string -> (t,t) Result.t
-  (** Like [normalize], but if the string starts with a lowercase identifier
-      character, it is replaced by the corresponding uppercase character.
-      Subsequent characters are not changed. *)
-
-  val uncapitalize: string -> (t,t) Result.t
-  (** Like [normalize], but if the string starts with an uppercase identifier
-      character, it is replaced by the corresponding lowercase character.
-      Subsequent characters are not changed. *)
-
-  val is_capitalized: t -> bool
-  (** Returns [true] if the given normalized string starts with an
-      uppercase identifier character, [false] otherwise.  May return
-      wrong results if the string is not normalized. *)
-
-  val is_valid_identifier: t -> bool
-  (** Check whether the given normalized string is a valid OCaml identifier:
-      - all characters are identifier characters
-      - it does not start with a digit or a single quote
-  *)
-
-  val is_lowercase: t -> bool
-  (** Returns [true] if the given normalized string only contains lowercase
-      identifier character, [false] otherwise. May return wrong results if the
-      string is not normalized. *)
-
-  type validation_result =
-    | Valid
-    | Invalid_character of Uchar.t   (** Character not allowed *)
-    | Invalid_beginning of Uchar.t   (** Character not allowed as first char *)
-
-  val validate_identifier: ?with_dot:bool -> t -> validation_result
-  (** Like [is_valid_identifier], but returns a more detailed error code. Dots
-      can be allowed to extend support to path-like identifiers. *)
-
-  val starts_like_a_valid_identifier: t -> bool
-  (** Checks whether the given normalized string starts with an identifier
-      character other than a digit or a single quote.  Subsequent characters
-      are not checked. *)
-end
-
+val is_print_longer_than: int -> (Format.formatter -> unit) -> bool
+(** Returns [true] if the printed string is longer than the given integer. Stops
+    early if so. Spaces and newlines are counted, but indentation is not. *)

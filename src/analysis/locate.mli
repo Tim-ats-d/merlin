@@ -26,6 +26,14 @@
 
    )* }}} *)
 
+module Artifact : sig
+  type t
+
+  val read : string -> t
+
+  val impl_shape : t -> Shape.t option
+end
+
 val log : 'a Logger.printf
 
 type config =
@@ -45,12 +53,22 @@ type result =
     approximated : bool
   }
 
+module Namespace_resolution : sig
+  type t =
+    | From_context of Query_protocol.Locate_context.t
+        (** Choose the namespaces based on a [Query_protocol.Locate_context.t] *)
+    | Explicit of Env_lookup.Namespace.inferred_basic list
+        (** Explicitly choose which namespaces to search in. The namespaces are prioritized
+        based on the list order (with the first element being highest priority) *)
+    | Inferred  (** Infer which namespaces to search in *)
+end
+
 val uid_of_result :
   traverse_aliases:bool -> Shape_reduce.result -> Shape.Uid.t option * bool
 
-(** Lookup the delcaration of the given Uid in the appropriate cmt file *)
-val lookup_uid_decl :
-  config:Mconfig.t -> Shape.Uid.t -> Typedtree.item_declaration option
+(** Lookup the declaration of the given Uid in the appropriate cmt file *)
+val lookup_uid_loc_of_decl :
+  config:Mconfig.t -> Shape.Uid.t -> string Location.loc option
 
 (** [get_linked_uids] queries the [cmt_declaration_dependencies] table and
   returns udis related to the one passed as argument. TODO right now this
@@ -81,7 +99,8 @@ val from_string :
   env:Env.t ->
   local_defs:Mtyper.typedtree ->
   pos:Lexing.position ->
-  ?namespaces:Env_lookup.Namespace.inferred_basic list ->
+  ?let_pun_behavior:Mbrowse.Let_pun_behavior.t ->
+  ?namespaces:Namespace_resolution.t ->
   string ->
   [> `File_not_found of result
   | `Found of result

@@ -34,6 +34,24 @@ type constructor_usage_warning =
   | Not_constructed
   | Only_exported_private
 
+type upstream_compat_warning =
+  | Immediate_erasure of string (* example: annotation in
+      [type ('a : immediate) t = int] can't be erased. *)
+  | Non_value_sort of string (* example: abstract type
+      [t : float64] is marked as unboxed. *)
+  | Unboxed_attribute of string (* example: unboxed attribute
+      on an external declaration with float# is missing. *)
+  | Immediate_void_variant
+      (* example: [type t = A of void] is immediate, but
+         not after erasure, which boxes void, so it can't be erased. *)
+  | Separability_check
+      (* example: [type packed = | Mk of 'a t [@@unboxed]]
+         where ['a t : value mod non_float]. *)
+
+type name_out_of_scope_warning =
+  | Name of string
+  | Fields of { record_form : string ; fields : string list }
+
 type t =
   | Comment_start                           (*  1 *)
   | Comment_not_end                         (*  2 *)
@@ -43,7 +61,7 @@ type t =
   | Labels_omitted of string list           (*  6 *)
   | Method_override of string list          (*  7 *)
   | Partial_match of string                 (*  8 *)
-  | Missing_record_field_pattern of string  (*  9 *)
+  | Missing_record_field_pattern of { form : string ; unbound : string } (* 9 *)
   | Non_unit_statement                      (* 10 *)
   | Redundant_case                          (* 11 *)
   | Redundant_subpat                        (* 12 *)
@@ -57,11 +75,11 @@ type t =
   | Ignored_extra_argument                  (* 20 *)
   | Nonreturning_statement                  (* 21 *)
   | Preprocessor of string                  (* 22 *)
-  | Useless_record_with                     (* 23 *)
+  | Useless_record_with of string           (* 23 *)
   | Bad_module_name of string               (* 24 *)
   | All_clauses_guarded                     (* 8, used to be 25 *)
-  | Unused_var of string                    (* 26 *)
-  | Unused_var_strict of string             (* 27 *)
+  | Unused_var of { name : string ; mutated : bool } (* 26 *)
+  | Unused_var_strict of { name : string ; mutated : bool } (* 27 *)
   | Wildcard_arg_to_constant_constr         (* 28 *)
   | Eol_in_string                           (* 29 *)
   | Duplicate_definitions of string * string * string * string (*30 *)
@@ -75,7 +93,7 @@ type t =
   | Unused_constructor of string * constructor_usage_warning (* 37 *)
   | Unused_extension of string * bool * constructor_usage_warning (* 38 *)
   | Unused_rec_flag                         (* 39 *)
-  | Name_out_of_scope of string * string list * bool (* 40 *)
+  | Name_out_of_scope of string * name_out_of_scope_warning (* 40 *)
   | Ambiguous_name of string list * string list *  bool * string (* 41 *)
   | Disambiguated_name of string            (* 42 *)
   | Nonoptional_label of string             (* 43 *)
@@ -93,7 +111,9 @@ type t =
   | Inlining_impossible of string           (* 55 *)
   | Unreachable_case                        (* 56 *)
   | Ambiguous_var_in_pattern_guard of string list (* 57 *)
-  | No_cmx_file of string                   (* 58 *)
+  | No_cmx_file of
+      { missing_extension : string;
+        module_name : string }              (* 58 *)
   | Flambda_assignment_to_non_mutable_value (* 59 *)
   | Unused_module of string                 (* 60 *)
   | Unboxable_type_in_prim_decl of string   (* 61 *)
@@ -104,12 +124,27 @@ type t =
   | Unused_open_bang of string              (* 66 *)
   | Unused_functor_parameter of string      (* 67 *)
   | Match_on_mutable_state_prevent_uncurry  (* 68 *)
-  | Unused_field of string * field_usage_warning (* 69 *)
+  | Unused_field of
+      { form : string; field : string; complaint : field_usage_warning }(* 69 *)
   | Missing_mli                             (* 70 *)
   | Unused_tmc_attribute                    (* 71 *)
   | Tmc_breaks_tailcall                     (* 72 *)
   | Generative_application_expects_unit     (* 73 *)
-  | Degraded_to_partial_match               (* 74 *)
+  | Unmutated_mutable of string             (* 186 *)
+  | Incompatible_with_upstream of upstream_compat_warning (* 187 *)
+  | Unerasable_position_argument            (* 188 *)
+  | Unnecessarily_partial_tuple_pattern     (* 189 *)
+  | Probe_name_too_long of string           (* 190 *)
+  | Zero_alloc_all_hidden_arrow of string   (* 198 *)
+  | Unchecked_zero_alloc_attribute          (* 199 *)
+  | Unboxing_impossible                     (* 210 *)
+  | Mod_by_top of string                    (* 211 *)
+  (* 212 taken *)
+  | Modal_axis_specified_twice of
+    { axis : string;
+      overriden_by : string;
+    } (* 213 *)
+  | Atomic_float_record_boxed               (* 214 *)
 
 (* If you remove a warning, leave a hole in the numbering.  NEVER change
    the numbers of existing warnings.
@@ -141,7 +176,7 @@ let number = function
   | Ignored_extra_argument -> 20
   | Nonreturning_statement -> 21
   | Preprocessor _ -> 22
-  | Useless_record_with -> 23
+  | Useless_record_with _ -> 23
   | Bad_module_name _ -> 24
   | All_clauses_guarded -> 8 (* used to be 25 *)
   | Unused_var _ -> 26
@@ -191,13 +226,24 @@ let number = function
   | Unused_tmc_attribute -> 71
   | Tmc_breaks_tailcall -> 72
   | Generative_application_expects_unit -> 73
-  | Degraded_to_partial_match -> 74
+  | Unmutated_mutable _ -> 186
+  | Incompatible_with_upstream _ -> 187
+  | Unerasable_position_argument -> 188
+  | Unnecessarily_partial_tuple_pattern -> 189
+  | Probe_name_too_long _ -> 190
+  | Zero_alloc_all_hidden_arrow _ -> 198
+  | Unchecked_zero_alloc_attribute -> 199
+  | Unboxing_impossible -> 210
+  | Mod_by_top _ -> 211
+  | Modal_axis_specified_twice _ -> 213
+  | Atomic_float_record_boxed -> 214
 ;;
 (* DO NOT REMOVE the ;; above: it is used by
    the testsuite/ests/warnings/mnemonics.mll test to determine where
    the  definition of the number function above ends *)
 
-let last_warning_number = 74
+let last_warning_number = 250
+;;
 
 type description =
   { number : int;
@@ -536,11 +582,52 @@ let descriptions = [
     description = "A generative functor is applied to an empty structure \
                    (struct end) rather than to ().";
     since = since 5 1 };
-  { number = 74;
-    names = ["degraded-to-partial-match"];
-    description = "A pattern-matching is compiled as partial \
-                   even if it appears to be total.";
-    since = since 5 3 };
+  { number = 186;
+    names = ["unmutated-mutable"];
+    description =
+    "Mutable variable was never mutated: mutable variable that\n\
+    \    doesn't start with an underscore (\"_\") character was never mutated.";
+    since = since 5 2 };
+  { number = 187;
+    names = ["incompatible-with-upstream"];
+    description = "Extension usage is incompatible with upstream.";
+    since = since 5 1 };
+  { number = 188;
+    names = ["unerasable-position-argument"];
+    description = "Unerasable position argument.";
+    since = since 5 1 };
+  { number = 189;
+    names = ["unnecessarily-partial-tuple-pattern"];
+    description = "A tuple pattern ends in .. but fully matches its expected \
+                   type.";
+    since = since 5 1 };
+  { number = 190;
+    names = ["probe-name-too-long"];
+    description = "Probe name must be at most 100 characters long.";
+    since = since 4 14 };
+  { number = 198;
+    names = ["zero-alloc-all-hidden-arrow"];
+    description = "A declaration whose type is an alias of a function type \
+                   will be ignored by zero_alloc all or all_opt.";
+    since = since 4 14 };
+  { number = 199;
+    names = ["unchecked-zero-alloc-attribute"];
+    description = "A property of a function that was \
+                  optimized away cannot be checked.";
+    since = since 4 14 };
+  { number = 210;
+    names = ["unboxing-impossible"];
+    description = "The parameter or return value corresponding @unboxed attribute cannot be unboxed.";
+    since = since 4 14 };
+  { number = 211;
+    names = ["mod-by-top"];
+    description = "Including the top-most element of an axis in a kind's modifiers is a no-op.";
+    since = since 4 14 };
+  { number = 214;
+    names = ["atomic-float-record-boxed"];
+    description = "Record contains atomic float fields, preventing the flat\n\
+                   float record optimization.";
+    since = since 4 14 };
 ]
 
 let name_to_number =
@@ -552,7 +639,10 @@ let name_to_number =
 
 (* Must be the max number returned by the [number] function. *)
 
-let letter = function
+let parsed_ocamlparam = ref "<not-set>"
+
+(* CR-soon xclerc for xclerc: remove the `for_debug` parameter... *)
+let letter for_debug = function
   | 'a' ->
      let rec loop i = if i = 0 then [] else i :: loop (i - 1) in
      loop last_warning_number
@@ -581,7 +671,9 @@ let letter = function
   | 'x' -> [14; 15; 16; 17; 18; 19; 20; 21; 22; 23; 24; 30]
   | 'y' -> [26]
   | 'z' -> [27]
-  | _ -> assert false
+  | chr ->
+    let ocamlparam_from_env = match Sys.getenv_opt "OCAMLPARAM" with None -> "-" | Some  value -> value in
+    Misc.fatal_errorf "Warnings.letter %C (for_debug=%S, ocamlparam_from_env=%S ocamlparam_from_compenv=%S)" chr for_debug ocamlparam_from_env !parsed_ocamlparam
 
 type state =
   {
@@ -847,7 +939,7 @@ let parse_opt error active errflag s =
           | None -> if c = lc then Clear else Set
           | Some m -> m
         in
-        List.iter (action modifier) (letter lc)
+        List.iter (action modifier) (letter s lc)
     | Num(n1,n2,modifier) ->
         for n = n1 to Int.min n2 last_warning_number do action modifier n done
   in
@@ -917,8 +1009,9 @@ let message = function
   | Partial_match s ->
       "this pattern-matching is not exhaustive.\n\
        Here is an example of a case that is not matched:\n" ^ s
-  | Missing_record_field_pattern s ->
-      "the following labels are not bound in this record pattern:\n" ^ s ^
+  | Missing_record_field_pattern { form ; unbound } ->
+      "the following labels are not bound in this " ^ form ^ " pattern:\n" ^
+      unbound ^
       "\nEither bind these labels explicitly or add '; _' to the pattern."
   | Non_unit_statement ->
       "this expression should have type unit."
@@ -949,19 +1042,25 @@ let message = function
   | Nonreturning_statement ->
       "this statement never returns (or has an unsound type.)"
   | Preprocessor s -> s
-  | Useless_record_with ->
-      "all the fields are explicitly listed in this record:\n\
+  | Useless_record_with s ->
+      "all the fields are explicitly listed in this " ^ s ^ ":\n\
        the 'with' clause is useless."
   | Bad_module_name (modname) ->
       "bad source file name: \"" ^ modname ^ "\" is not a valid module name."
   | All_clauses_guarded ->
       "this pattern-matching is not exhaustive.\n\
        All clauses in this pattern-matching are guarded."
-  | Unused_var v | Unused_var_strict v -> "unused variable " ^ v ^ "."
+  | Unused_var { name = v; mutated = false }
+  | Unused_var_strict { name = v; mutated = false } ->
+    "unused variable " ^ v ^ "."
+  | Unused_var { name = v; mutated = true }
+  | Unused_var_strict { name = v; mutated = true } ->
+    "variable " ^ v ^ " was mutated but never used."
   | Wildcard_arg_to_constant_constr ->
      "wildcard pattern given as argument to a constant constructor"
   | Eol_in_string ->
-     "unescaped end-of-line in a string constant (non-portable code)"
+     "unescaped end-of-line in a string constant\n\
+      (non-portable behavior before OCaml 5.2)"
   | Duplicate_definitions (kind, cname, tc1, tc2) ->
       Printf.sprintf "the %s %s is defined in both types %s and %s."
         kind cname tc1 tc2
@@ -997,15 +1096,14 @@ let message = function
      end
   | Unused_rec_flag ->
       "unused rec flag."
-  | Name_out_of_scope (ty, [nm], false) ->
+  | Name_out_of_scope (ty, Name nm) ->
       nm ^ " was selected from type " ^ ty ^
       ".\nIt is not visible in the current scope, and will not \n\
        be selected if the type becomes unknown."
-  | Name_out_of_scope (_, _, false) -> assert false
-  | Name_out_of_scope (ty, slist, true) ->
-      "this record of type "^ ty ^" contains fields that are \n\
+  | Name_out_of_scope (ty, Fields { record_form ; fields }) ->
+      "this " ^ record_form ^ " of type "^ ty ^" contains fields that are \n\
        not visible in the current scope: "
-      ^ String.concat " " slist ^ ".\n\
+      ^ String.concat " " fields ^ ".\n\
        They will not be selected if the type becomes unknown."
   | Ambiguous_name ([s], tl, false, expansion) ->
       s ^ " belongs to several types: " ^ String.concat " " tl ^
@@ -1051,7 +1149,7 @@ let message = function
       Printf.sprintf "expected %s"
         (if b then "tailcall" else "non-tailcall")
   | Fragile_literal_pattern ->
-      let[@manual.ref "ss:warn52"] ref_manual = [ 13; 5; 3 ] in
+      let ref_manual = [ 13; 5; 3 ] in
       Format.asprintf
         "Code should not depend on the actual values of\n\
          this constructor's arguments. They are only for information\n\
@@ -1069,7 +1167,7 @@ let message = function
   | Inlining_impossible reason ->
       Printf.sprintf "Cannot inline: %s" reason
   | Ambiguous_var_in_pattern_guard vars ->
-      let[@manual.ref "ss:warn57"] ref_manual = [ 13; 5; 4 ] in
+      let ref_manual = [ 13; 5; 4 ] in
       let vars = List.sort String.compare vars in
       let vars_explanation =
         let in_different_places =
@@ -1087,11 +1185,12 @@ let message = function
          %s.\n\
          Only the first match will be used to evaluate the guard expression.\n\
          %a"
-        vars_explanation (Format_doc.compat Misc.print_see_manual) ref_manual
-  | No_cmx_file name ->
+        vars_explanation Misc.print_see_manual ref_manual
+  | No_cmx_file { missing_extension; module_name } ->
       Printf.sprintf
-        "no cmx file was found in path for module %s, \
-         and its interface was not compiled with -opaque" name
+        "no %s file was found in path for module %s, \
+         and its interface was not compiled with -opaque"
+        missing_extension module_name
   | Flambda_assignment_to_non_mutable_value ->
       "A potential assignment to a non-mutable value was detected \n\
         in this source file.  Such assignments may generate incorrect code \n\
@@ -1128,13 +1227,14 @@ let message = function
     "This pattern depends on mutable state.\n\
      It prevents the remaining arguments from being uncurried, which will \
      cause additional closure allocations."
-  | Unused_field (s, Unused) -> "unused record field " ^ s ^ "."
-  | Unused_field (s, Not_read) ->
-      "record field " ^ s ^
+  | Unused_field { form; field; complaint = Unused } ->
+      "unused " ^ form ^ " field " ^ field ^ "."
+  | Unused_field { form; field; complaint = Not_read } ->
+      form ^ " field " ^ field ^
       " is never read.\n\
         (However, this field is used to build or mutate values.)"
-  | Unused_field (s, Not_mutated) ->
-      "mutable record field " ^ s ^
+  | Unused_field { form; field; complaint = Not_mutated } ->
+      "mutable " ^ form ^ " field " ^ field ^
       " is never mutated."
   | Missing_mli ->
     "Cannot find interface file."
@@ -1152,16 +1252,73 @@ let message = function
   | Generative_application_expects_unit ->
       "A generative functor\n\
        should be applied to '()'; using '(struct end)' is deprecated."
-  | Degraded_to_partial_match ->
-      let[@manual.ref "ss:warn74"] ref_manual = [ 13; 5; 5 ] in
-      Format.asprintf
-        "This pattern-matching is compiled \n\
-         as partial, even if it appears to be total. \
-         It may generate a Match_failure\n\
-         exception. This typically occurs due to \
-         complex matches on mutable fields.\n\
-         %a"
-        (Format_doc.compat Misc.print_see_manual) ref_manual
+  | Unmutated_mutable v -> "mutable variable " ^ v ^ " was never mutated."
+  | Incompatible_with_upstream (Immediate_erasure id)  ->
+      Printf.sprintf
+      "Usage of layout immediate/immediate64 in %s \n\
+       can't be erased for compatibility with upstream OCaml."
+      id
+  | Incompatible_with_upstream (Non_value_sort layout) ->
+      Printf.sprintf
+      "External declaration here is not upstream compatible. \n\
+       The only types with non-value layouts allowed are float#, \n\
+       int32#, int64#, and nativeint#. Unknown type with layout \n\
+       %s encountered."
+      layout
+  | Incompatible_with_upstream (Unboxed_attribute layout) ->
+      Printf.sprintf
+      "[@unboxed] attribute must be added to external declaration \n\
+       argument type with layout %s for upstream compatibility."
+      layout
+  | Incompatible_with_upstream Immediate_void_variant ->
+      "This variant is immediate \n\
+       because all its constructors have all-void arguments, but after \n\
+       erasure for upstream compatibility, void is no longer zero-width, \n\
+       so it won't be immediate."
+  | Incompatible_with_upstream Separability_check ->
+      "This type relies on OxCaml's extended separability checking \n\
+       and would not be accepted by upstream OCaml."
+  | Unerasable_position_argument -> "this position argument cannot be erased."
+  | Unnecessarily_partial_tuple_pattern ->
+      "This tuple pattern\n\
+       unnecessarily ends in '..', as it explicitly matches all components\n\
+       of its expected type."
+  | Probe_name_too_long name ->
+      Printf.sprintf
+        "This probe name is too long: `%s'. \
+         Probe names must be at most 100 characters long." name
+  | Zero_alloc_all_hidden_arrow s ->
+      Printf.sprintf
+      "The type of this item is an\n\
+       alias of a function type, but the [@@@zero_alloc %s] attribute for\n\
+       this signature does not apply to it because its type is not\n\
+       syntactically a function type. If it should be checked, use an\n\
+       explicit zero_alloc attribute with an arity. If not, use an explicit\n\
+       zero_alloc ignore attribute." s
+  | Unchecked_zero_alloc_attribute ->
+      Printf.sprintf "the zero_alloc attribute cannot be checked.\n\
+      The function it is attached to was optimized away. \n\
+      You can try to mark this function as [@inline never] \n\
+      or move the attribute to the relevant callers of this function."
+  | Unboxing_impossible ->
+      Printf.sprintf
+        "This [@unboxed] attribute cannot be used.\n\
+         The type of this value does not allow unboxing."
+  | Mod_by_top modifier ->
+      Printf.sprintf
+        "%s is the top-most modifier.\n\
+         Modifying by a top element is a no-op."
+        modifier
+  | Modal_axis_specified_twice {axis; overriden_by} ->
+    Printf.sprintf
+      "This %s is overriden by %s later."
+      axis overriden_by
+  | Atomic_float_record_boxed ->
+    Printf.sprintf
+      "This record contains atomic\n\
+       float fields, which prevents the float record optimization. The\n\
+       fields of this record will be boxed instead of being\n\
+       represented as a flat float array."
 ;;
 
 let nerrors = ref 0
@@ -1257,7 +1414,7 @@ let help_warnings () =
   print_endline "  A all warnings";
   for i = Char.code 'b' to Char.code 'z' do
     let c = Char.chr i in
-    match letter c with
+    match letter "<help-warnings>" c with
     | [] -> ()
     | [n] ->
         Printf.printf "  %c Alias for warning %i.\n" (Char.uppercase_ascii c) n

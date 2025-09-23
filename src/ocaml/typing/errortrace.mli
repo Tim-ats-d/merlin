@@ -100,6 +100,11 @@ type ('a, 'variety) elt =
   | First_class_module: first_class_module -> ('a,_) elt
   (* Unification & Moregen; included in Equality for simplicity *)
   | Rec_occur : type_expr * type_expr -> ('a, _) elt
+  | Bad_jkind : type_expr * Jkind.Violation.t -> ('a, _) elt
+  | Bad_jkind_sort : type_expr * Jkind.Violation.t -> ('a, _) elt
+  | Unequal_var_jkinds :
+      type_expr * jkind_lr * type_expr * jkind_lr -> ('a, _) elt
+  | Unequal_tof_kind_jkinds : jkind_lr * jkind_lr -> ('a, _) elt
 
 type ('a, 'variety) t = ('a, 'variety) elt list
 

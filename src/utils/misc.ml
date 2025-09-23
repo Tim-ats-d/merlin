@@ -13,6 +13,7 @@
 (*                                                                        *)
 (**************************************************************************)
 
+module CamlList = List
 module CamlString = String
 
 open Std
@@ -352,9 +353,12 @@ let may_map f x = Option.map ~f x
 
 let remove_file filename =
   try
-    if Sys.is_regular_file filename
+    (* merge5: Partial revert of upstream PR 11412, to allow building
+       with OCaml 4.14 (which does not have is_regular_file *)
+    if Sys.file_exists filename
     then Sys.remove filename
-  with Sys_error _msg -> ()
+  with Sys_error _msg ->
+    ()
 
 let rec split_path_and_prepend path acc =
   match Filename.dirname path with
@@ -640,6 +644,46 @@ module Int_literal_converter = struct
   let int32 s = cvt_int_aux s Int32.neg Int32.of_string
   let int64 s = cvt_int_aux s Int64.neg Int64.of_string
   let nativeint s = cvt_int_aux s Nativeint.neg Nativeint.of_string
+
+  (* Follows "parse_sign_and_base" in runtime/ints.c *)
+  let parse_signedness s =
+    let char_at i =
+      if String.length s > i
+      then Some s.[i]
+      else None
+    in
+    let p =
+      match char_at 0 with
+      | Some ('-' | '+') -> 1
+      | Some _ | None -> 0
+    in
+    match char_at p with
+    | Some '0' ->
+      begin match char_at (p+1) with
+      | Some ('x' | 'X' | 'o' | 'O' | 'b' | 'B' | 'u' | 'U') -> false
+      | Some _ | None -> true
+      end
+    | Some _ | None -> true
+
+  let cvt_small_int str ~bits =
+    let i = int_of_string str in
+    let max_int = (1 lsl (bits-1)) - 1 in
+    let min_int = -(1 lsl (bits-1)) in
+    let max_uint = (1 lsl bits) - 1 in
+    let lower_limit, upper_limit =
+      if parse_signedness str
+      then min_int, max_int + 1
+      else -max_uint, max_uint
+    in
+    if i < lower_limit || i > upper_limit
+    then failwith "small int overflow";
+    (* handle overflow *)
+    if i > max_int then i - (max_uint + 1)
+    else if i < min_int then i + (max_uint + 1)
+    else i
+
+  let int8 s = cvt_small_int s ~bits:8
+  let int16 s = cvt_small_int s ~bits:16
 end
 
 (* [find_first_mono p] assumes that there exists a natural number
@@ -1019,6 +1063,39 @@ let print_see_manual ppf manual_section =
     (pp_print_list ~pp_sep:(fun f () -> pp_print_char f '.') pp_print_int)
     manual_section
 
+let output_of_print print =
+  let output out_channel t =
+    let ppf = Format.formatter_of_out_channel out_channel in
+    print ppf t;
+    (* Must flush the formatter immediately because it has a buffer separate
+        from the output channel's buffer *)
+    Format.pp_print_flush ppf ()
+  in
+  output
+
+let is_print_longer_than size p =
+  let exception Limit_exceeded in
+  let limit = ref size in
+  let count_down len =
+    limit := !limit - len;
+    if !limit < 0 then raise Limit_exceeded
+  in
+  let out_string _ _ len = count_down len in
+  let out_newline () = count_down 1 in
+  let out_spaces n = count_down n in
+  let out_flush _ = () in
+  let out_indent _ = () in
+  let out_functions : Format.formatter_out_functions = {
+    out_string;
+    out_flush;
+    out_newline;
+    out_spaces;
+    out_indent}
+  in
+  let ppf = Format.formatter_of_out_functions out_functions in
+  try p ppf; false
+  with Limit_exceeded -> true
+
 let time_spent () =
   let open Unix in
   let t = times () in
@@ -1060,6 +1137,26 @@ let modules_in_path ~ext path =
           end results (Sys.readdir dir)
       with Sys_error _ -> results
     end
+
+module List = struct
+  include CamlList
+
+  (* merlin-jst: From the compiler's `Misc.Stdlib.List` *)
+  let rec is_prefix ~equal t ~of_ =
+    match t, of_ with
+    | [], [] -> true
+    | _::_, [] -> false
+    | [], _::_ -> true
+    | x1::t, x2::of_ -> equal x1 x2 && is_prefix ~equal t ~of_
+
+  let rec iteri2 i f l1 l2 =
+    match (l1, l2) with
+      ([], []) -> ()
+    | (a1::l1, a2::l2) -> f i a1 a2; iteri2 (i + 1) f l1 l2
+    | (_, _) -> raise (Invalid_argument "iteri2")
+
+  let iteri2 f l1 l2 = iteri2 0 f l1 l2
+end
 
 module String = struct
   include CamlString

@@ -24,6 +24,32 @@
 open Asttypes
 module Uid = Shape.Uid
 
+(* We define a new constant type that can represent unboxed values.
+   This is currently used only in [Typedtree], but the long term goal
+   is to share this definition with [Lambda] and completely replace the
+   usage of [Asttypes.constant] *)
+type constant =
+    Const_int of int
+  | Const_char of char
+  | Const_untagged_char of char
+  | Const_string of string * Location.t * string option
+  | Const_float of string
+  | Const_float32 of string
+  | Const_unboxed_float of string
+  | Const_unboxed_float32 of string
+  | Const_int8 of int
+  | Const_int16 of int
+  | Const_int32 of int32
+  | Const_int64 of int64
+  (* CR mshinwell: This should use [Targetint.t] not [nativeint] *)
+  | Const_nativeint of nativeint
+  | Const_untagged_int of int
+  | Const_untagged_int8 of int
+  | Const_untagged_int16 of int
+  | Const_unboxed_int32 of int32
+  | Const_unboxed_int64 of int64
+  | Const_unboxed_nativeint of nativeint
+
 (* Value expressions for the core language *)
 
 type partial = Partial | Total
@@ -42,6 +68,59 @@ type _ pattern_category =
 | Value : value pattern_category
 | Computation : computation pattern_category
 
+(** A unique barrier annotates field accesses (eg. Texp_field and patterns)
+    with the uniqueness mode of the allocation that is projected out of.
+    Projections out of unique allocations may not be pushed down in later
+    stages of the compiler, because the unique allocation may be overwritten. *)
+module Unique_barrier : sig
+  type t
+
+  (* Barriers start out as not computed. *)
+  val not_computed : unit -> t
+
+  (* The uniqueness analysis enables all barriers. *)
+  val enable : t -> unit
+
+  (* Record an upper bound on the uniqueness of the record. *)
+  val add_upper_bound : Mode.Uniqueness.r -> t -> unit
+
+  (* Resolve the unique barrier once type-checking is complete. *)
+  val resolve : t -> Mode.Uniqueness.Const.t
+
+  val print : Format.formatter -> t -> unit
+end
+
+(** The uniqueness/linearity of a usage (such as [Pexp_ident]) inferred by the
+    type checker. It is derived during type checking as follows:
+      [unique_use.uniqueness = expected_mode.uniqueness]
+      [unique_use.linearity  = actual_mode.linearity]
+    for example, [let x = P in f x], [(Pexp_ident x).unique_use] will contain
+    the expected [uniqueness] of [f]'s parameter, and [linearity] of [P].
+    [uniqueness_analysis.ml] will _lexically_ infer the uniqueness/linearity of
+    a usage and compare against [unique_use]. Following the example, if there
+    are two [f x], the uniqueness analysis will perform the following for
+    [unique_use] of both [Pexp_ident x]:
+      [unique_use.uniqueness >= aliased]
+      [unique_use.linearity <= many]
+    That is, the consumers of the values (that is [f]) must not require its
+    parameter to be [unique], and the value itself (that is [P]) must be [many].
+*)
+type unique_use = Mode.Uniqueness.r * Mode.Linearity.l
+
+val print_unique_use : Format.formatter -> unique_use -> unit
+
+type alloc_mode = Mode.Alloc.r
+
+type texp_field_boxing =
+  | Boxing of alloc_mode * unique_use
+  (** Projection requires boxing. [unique_use] describes the usage of the
+      unboxed field as argument to boxing. *)
+  | Non_boxing of unique_use
+  (** Projection does not require boxing. [unique_use] describes the usage of
+      the field as the result of direct projection. *)
+
+val aliased_many_use : unique_use
+
 type pattern = value general_pattern
 and 'k general_pattern = 'k pattern_desc pattern_data
 
@@ -52,6 +131,9 @@ and 'a pattern_data =
     pat_type: Types.type_expr;
     pat_env: Env.t;
     pat_attributes: attributes;
+    pat_unique_barrier : Unique_barrier.t;
+    (** This tracks whether the scrutinee of the pattern is used uniquely
+        within the body of the pattern match. *)
    }
 
 and pat_extra =
@@ -78,21 +160,38 @@ and 'k pattern_desc =
   (* value patterns *)
   | Tpat_any : value pattern_desc
         (** _ *)
-  | Tpat_var : Ident.t * string loc * Uid.t -> value pattern_desc
+  | Tpat_var :
+      Ident.t * string loc * Uid.t * Jkind_types.Sort.t * Mode.Value.l ->
+      value pattern_desc
         (** x *)
   | Tpat_alias :
-      value general_pattern * Ident.t * string loc * Uid.t -> value pattern_desc
+      value general_pattern * Ident.t * string loc * Uid.t * Jkind_types.Sort.t
+      * Mode.Value.l * Types.type_expr
+        -> value pattern_desc
         (** P as a *)
   | Tpat_constant : constant -> value pattern_desc
         (** 1, 'a', "true", 1.0, 1l, 1L, 1n *)
-  | Tpat_tuple : value general_pattern list -> value pattern_desc
-        (** (P1, ..., Pn)
+  | Tpat_tuple : (string option * value general_pattern) list -> value pattern_desc
+        (** (P1, ..., Pn)                  [(None,P1); ...; (None,Pn)])
+            (L1:P1, ... Ln:Pn)             [(Some L1,P1); ...; (Some Ln,Pn)])
+            Any mix, e.g. (L1:P1, P2)      [(Some L1,P1); ...; (None,P2)])
+
+            Invariant: n >= 2
+         *)
+  | Tpat_unboxed_tuple :
+      (string option * value general_pattern * Jkind.sort) list ->
+      value pattern_desc
+        (** #(P1, ..., Pn)              [(None,P1,s1); ...; (None,Pn,sn)])
+            #(L1:P1, ... Ln:Pn)         [(Some L1,P1,s1); ...; (Some Ln,Pn,sn)])
+            Any mix, e.g. #(L1:P1, P2)  [(Some L1,P1,s1); ...; (None,P2,s2)])
 
             Invariant: n >= 2
          *)
   | Tpat_construct :
       Longident.t loc * Types.constructor_description *
-        value general_pattern list * (Ident.t loc list * core_type) option ->
+        value general_pattern list *
+        ((Ident.t loc * Parsetree.jkind_annotation option) list * core_type)
+          option ->
       value pattern_desc
         (** C                             ([], None)
             C P                           ([P], None)
@@ -100,7 +199,9 @@ and 'k pattern_desc =
             C (P : t)                     ([P], Some ([], t))
             C (P1, ..., Pn : t)           ([P1; ...; Pn], Some ([], t))
             C (type a) (P : t)            ([P], Some ([a], t))
-            C (type a) (P1, ..., Pn : t)  ([P1; ...; Pn], Some ([a], t))
+            C (type a) (P1, ..., Pn : t)  ([P1; ...; Pn], Some ([a, None], t))
+            C (type (a : k)) (P1, ..., Pn : t)
+                                   ([P1; ...; Pn], Some ([a, Some k], t))
           *)
   | Tpat_variant :
       label * value general_pattern option * Types.row_desc ref ->
@@ -119,8 +220,19 @@ and 'k pattern_desc =
 
             Invariant: n > 0
          *)
-  | Tpat_array : value general_pattern list -> value pattern_desc
-        (** [| P1; ...; Pn |] *)
+  | Tpat_record_unboxed_product :
+      (Longident.t loc * Types.unboxed_label_description * value general_pattern) list *
+        closed_flag ->
+      value pattern_desc
+        (** #{ l1=P1; ...; ln=Pn }     (flag = Closed)
+            #{ l1=P1; ...; ln=Pn; _}   (flag = Open)
+
+            Invariant: n > 0
+         *)
+  | Tpat_array :
+      Types.mutability * Jkind.sort * value general_pattern list -> value pattern_desc
+        (** [| P1; ...; Pn |]    (flag = Mutable)
+            [: P1; ...; Pn :]    (flag = Immutable) *)
   | Tpat_lazy : value general_pattern -> value pattern_desc
         (** lazy P *)
   (* computation patterns *)
@@ -170,17 +282,42 @@ and exp_extra =
          *)
   | Texp_poly of core_type option
         (** Used for method bodies. *)
-  | Texp_newtype of string
-        (** fun (type t) ->  *)
-  | Texp_newtype' of Ident.t * label loc * Uid.t
-  (** merlin-specific: keep enough information to correctly implement
-      occurrences for local-types.
-      Merlin typechecker uses [Texp_newtype'] constructor, while upstream
-      OCaml still uses [Texp_newtype]. Those can appear when unmarshaling cmt
-      files. By adding a new constructor, we can still safely uses these. *)
+  | Texp_newtype of Ident.t * string loc *
+                    Parsetree.jkind_annotation option * Uid.t
+        (** fun (type t : immediate) ->
 
+        The [Ident.t] and [Uid.t] fields are unused by the compiler, but Merlin needs
+        them. Merlin cannot be cleanly patched to include these fields because Merlin
+        must be able to deserialize typedtrees produced by the compiler. Thus, we include
+        them here, as the cost of tracking this additional information is minimal. *)
+  | Texp_stack
+        (** stack_ E *)
+  | Texp_mode of Mode.Alloc.Const.Option.t
+        (** E : _ @@ M  *)
+
+and arg_label = Types.arg_label =
+  | Nolabel
+  | Labelled of string
+  | Optional of string
+  | Position of string
+
+(** Jkinds in the typed tree: Compilation of the typed tree to lambda
+    sometimes requires jkind information.  Our approach is to
+    propagate jkind information inward during compilation.  This
+    requires us to annotate places in the typed tree where the jkind
+    of a type of a subexpression is not determined by the jkind of the
+    type of the expression containing it.  For example, to the left of
+    a semicolon, or in value_bindings.
+
+    CR layouts v1.5: Some of these were mainly needed for void (e.g., left of a
+    semicolon).  If we redo how void is compiled, perhaps we can drop those.  On
+    the other hand, there are some places we're not annotating now (e.g.,
+    function arguments) that will need annotations in the future because we'll
+    allow other jkinds there.  Just do a rationalization pass on this.
+*)
 and expression_desc =
-    Texp_ident of Path.t * Longident.t loc * Types.value_description
+    Texp_ident of
+      Path.t * Longident.t loc * Types.value_description * ident_kind * unique_use
         (** x
             M.x
          *)
@@ -190,21 +327,35 @@ and expression_desc =
         (** let P1 = E1 and ... and Pn = EN in E       (flag = Nonrecursive)
             let rec P1 = E1 and ... and Pn = EN in E   (flag = Recursive)
          *)
-  | Texp_function of function_param list * function_body
-    (** fun P0 P1 -> function p1 -> e1 | p2 -> e2  (body = Tfunction_cases _)
-        fun P0 P1 -> E                             (body = Tfunction_body _)
-
-        This construct has the same arity as the originating
-        {{!Parsetree.expression_desc.Pexp_function}[Pexp_function]}.
-        Arity determines when side-effects for effectful parameters are run
-        (e.g. optional argument defaults, matching against lazy patterns).
-        Parameters' effects are run left-to-right when an n-ary function is
-        saturated with n arguments.
-    *)
-  | Texp_apply of expression * (arg_label * expression option) list
+  | Texp_letmutable of value_binding * expression
+        (** let mutable P = E in E' *)
+  | Texp_function of
+      { params : function_param list;
+        body : function_body;
+        ret_mode : Mode.Alloc.l;
+        (* Mode where the function allocates, ie local for a function of
+           type 'a -> local_ 'b, and heap for a function of type 'a -> 'b *)
+        ret_sort : Jkind.sort;
+        alloc_mode : alloc_mode;
+        (* Mode at which the closure is allocated *)
+        zero_alloc : Zero_alloc.t;
+        (* zero-alloc attributes *)
+      }
+      (** fun P0 P1 -> function p1 -> e1 | p2 -> e2  (body = Tfunction_cases _)
+          fun P0 P1 -> E                             (body = Tfunction_body _)
+          This construct has the same arity as the originating
+          {{!Parsetree.Pexp_function}[Pexp_function]}.
+          Arity determines when side-effects for effectful parameters are run
+          (e.g. optional argument defaults, matching against lazy patterns).
+          Parameters' effects are run left-to-right when an n-ary function is
+          saturated with n arguments.
+      *)
+  | Texp_apply of
+      expression * (arg_label * apply_arg) list * apply_position *
+        Mode.Locality.l * Zero_alloc.assume option
         (** E0 ~l1:E1 ... ~ln:En
 
-            The expression can be None if the expression is abstracted over
+            The expression can be Omitted if the expression is abstracted over
             this argument. It currently appears when a label is applied.
 
             For example:
@@ -213,39 +364,63 @@ and expression_desc =
 
             The resulting typedtree for the application is:
             Texp_apply (Texp_ident "f/1037",
-                        [(Nolabel, None);
+                        [(Nolabel, Omitted _);
                          (Labelled "y", Some (Texp_constant Const_int 3))
                         ])
-         *)
-  | Texp_match of expression * computation case list * value case list * partial
+
+            The [Zero_alloc.assume option] records the optional [@zero_alloc
+            assume] attribute that may appear on applications. *)
+  | Texp_match of expression * Jkind.sort * computation case list * partial
         (** match E0 with
             | P1 -> E1
             | P2 | exception P3 -> E2
             | exception P4 -> E3
             | effect P4 k -> E4
 
-            [Texp_match (E0, [(P1, E1); (P2 | exception P3, E2);
-                              (exception P4, E3)], [(P4, E4)],  _)]
+            [Texp_match (E0, sort_of_E0, [(P1, E1); (P2 | exception P3, E2);
+                              (exception P4, E3)], _)]
          *)
-  | Texp_try of expression * value case list * value case list
-         (** try E with
-            | P1 -> E1
-            | effect P2 k -> E2
-            [Texp_try (E, [(P1, E1)], [(P2, E2)])]
+  | Texp_try of expression * value case list
+        (** try E with P1 -> E1 | ... | PN -> EN *)
+  | Texp_tuple of (string option * expression) list * alloc_mode
+        (** [Texp_tuple(el)] represents
+            - [(E1, ..., En)]
+                when [el] is [(None, E1);...;(None, En)],
+            - [(L1:E1, ..., Ln:En)]
+                when [el] is [(Some L1, E1);...;(Some Ln, En)],
+            - Any mix, e.g. [(L1: E1, E2)]
+                when [el] is [(Some L1, E1); (None, E2)]
           *)
-  | Texp_tuple of expression list
-        (** (E1, ..., EN) *)
+  | Texp_unboxed_tuple of (string option * expression * Jkind.sort) list
+        (** [Texp_unboxed_tuple(el)] represents
+            - [#(E1, ..., En)]
+                when [el] is [(None, E1, s1);...;(None, En, sn)],
+            - [#(L1:E1, ..., Ln:En)]
+                when [el] is [(Some L1, E1, s1);...;(Some Ln, En, sn)],
+            - Any mix, e.g. [#(L1: E1, E2)]
+                when [el] is [(Some L1, E1, s1); (None, E2, s2)]
+          *)
   | Texp_construct of
-      Longident.t loc * Types.constructor_description * expression list
+      Longident.t loc * Types.constructor_description *
+      expression list * alloc_mode option
         (** C                []
             C E              [E]
             C (E1, ..., En)  [E1;...;En]
+
+            [alloc_mode] is the allocation mode of the construct,
+            or [None] if the constructor is [Cstr_unboxed] or [Cstr_constant],
+            in which case it does not need allocation.
          *)
-  | Texp_variant of label * expression option
+  | Texp_variant of label * (expression * alloc_mode) option
+        (** [alloc_mode] is the allocation mode of the variant,
+            or [None] if the variant has no argument,
+            in which case it does not need allocation.
+          *)
   | Texp_record of {
       fields : ( Types.label_description * record_label_definition ) array;
       representation : Types.record_representation;
-      extended_expression : expression option;
+      extended_expression : (expression * Jkind.sort * Unique_barrier.t) option;
+      alloc_mode : alloc_mode option
     }
         (** { l1=P1; ...; ln=Pn }           (extended_expression = None)
             { E0 with l1=P1; ...; ln=Pn }   (extended_expression = Some E0)
@@ -257,21 +432,70 @@ and expression_desc =
             Texp_record
               { fields = [| l1, Kept t1; l2 Override P2 |]; representation;
                 extended_expression = Some E0 }
-        *)
-  | Texp_field of expression * Longident.t loc * Types.label_description
+            [alloc_mode] is the allocation mode of the record,
+            or [None] if it is [Record_unboxed],
+            in which case it does not need allocation.
+          *)
+  | Texp_record_unboxed_product of {
+      fields : ( Types.unboxed_label_description * record_label_definition ) array;
+      representation : Types.record_unboxed_product_representation;
+      extended_expression : (expression * Jkind.sort) option;
+    }
+        (** #{ l1=P1; ...; ln=Pn }           (extended_expression = None)
+            #{ E0 with l1=P1; ...; ln=Pn }   (extended_expression = Some E0)
+
+            Invariant: n > 0
+
+            If the type is #{ l1: t1; l2: t2 }, the expression
+            #{ E0 with t2=P2 } is represented as
+            Texp_record_unboxed_product
+              { fields = [| l1, Kept t1; l2 Override P2 |]; representation;
+                extended_expression = Some E0 }
+          *)
+  | Texp_atomic_loc of
+      expression * Jkind.sort * Longident.t loc * Types.label_description *
+      alloc_mode
+  | Texp_field of expression * Jkind.sort * Longident.t loc *
+      Types.label_description * texp_field_boxing * Unique_barrier.t
+    (** - The sort is the sort of the whole record (which may be non-value if
+          the record is @@unboxed).
+        - [texp_field_boxing] provides extra information depending on if the
+          projection requires boxing. *)
+  | Texp_unboxed_field of
+      expression * Jkind.sort * Longident.t loc * Types.unboxed_label_description *
+        unique_use
   | Texp_setfield of
-      expression * Longident.t loc * Types.label_description * expression
-  | Texp_array of expression list
+      expression * Mode.Locality.l * Longident.t loc *
+      Types.label_description * expression
+    (** [alloc_mode] translates to the [modify_mode] of the record *)
+  | Texp_array of Types.mutability * Jkind.Sort.t * expression list * alloc_mode
+  | Texp_idx of block_access * unboxed_access list
+  | Texp_list_comprehension of comprehension
+  | Texp_array_comprehension of Types.mutability * Jkind.sort * comprehension
   | Texp_ifthenelse of expression * expression * expression option
-  | Texp_sequence of expression * expression
-  | Texp_while of expression * expression
-  | Texp_for of
-      Ident.t * Parsetree.pattern * expression * expression * direction_flag *
-        expression
-  | Texp_send of expression * meth
-  | Texp_new of Path.t * Longident.t loc * Types.class_declaration
+  | Texp_sequence of expression * Jkind.sort * expression
+  | Texp_while of {
+      wh_cond : expression;
+      wh_body : expression;
+      wh_body_sort : Jkind.sort
+    }
+  | Texp_for of {
+      for_id  : Ident.t;
+      for_debug_uid: Shape.Uid.t;
+      for_pat : Parsetree.pattern;
+      for_from : expression;
+      for_to   : expression;
+      for_dir  : direction_flag;
+      for_body : expression;
+      for_body_sort : Jkind.sort;
+    }
+  | Texp_send of expression * meth * apply_position
+  | Texp_new of
+      Path.t * Longident.t loc * Types.class_declaration * apply_position
   | Texp_instvar of Path.t * Path.t * string loc
+  | Texp_mutvar of Ident.t loc
   | Texp_setinstvar of Path.t * Path.t * string loc * expression
+  | Texp_setmutvar of Ident.t loc * Jkind.sort * expression
   | Texp_override of Path.t * (Ident.t * string loc * expression) list
   | Texp_letmodule of
       Ident.t option * string option loc * Types.module_presence * module_expr *
@@ -285,27 +509,33 @@ and expression_desc =
       let_ : binding_op;
       ands : binding_op list;
       param : Ident.t;
+      param_debug_uid : Shape.Uid.t;
+      param_sort : Jkind.sort;
       body : value case;
+      body_sort : Jkind.sort;
       partial : partial;
     }
   | Texp_unreachable
   | Texp_extension_constructor of Longident.t loc * Path.t
   | Texp_open of open_declaration * expression
         (** let open[!] M in e *)
+  | Texp_probe of { name:string; handler:expression; enabled_at_init:bool }
+  | Texp_probe_is_enabled of { name:string }
+  | Texp_exclave of expression
+  | Texp_src_pos
+    (* A source position value which has been automatically inferred, either
+       as a result of [%call_pos] occuring in an expression, or omission of a
+       Position argument in function application *)
+  | Texp_overwrite of expression * expression (** overwrite_ exp with exp *)
+  | Texp_hole of unique_use (** _ *)
+  (* merlin-specific: a [Texp_typed_hole] is a typed hole written by the user as a
+      placeholder. This is in contrast to a Texp_hole, which is used in overwrite
+      expressions *)
   | Texp_typed_hole
 
-and meth =
-    Tmeth_name of string
-  | Tmeth_val of Ident.t
-  | Tmeth_ancestor of Ident.t * Path.t
-
-and 'k case =
-    {
-     c_lhs: 'k general_pattern;
-     c_cont: (Ident.t * Types.value_description) option;
-     c_guard: expression option;
-     c_rhs: expression;
-    }
+and function_curry =
+  | More_args of { partial_mode : Mode.Alloc.l }
+  | Final_arg
 
 and function_param =
   {
@@ -314,6 +544,7 @@ and function_param =
     (** [fp_param] is the identifier that is to be used to name the
         parameter of the function.
     *)
+    fp_param_debug_uid: Shape.Uid.t;
     fp_partial: partial;
     (**
        [fp_partial] =
@@ -321,42 +552,129 @@ and function_param =
        [Total] otherwise.
     *)
     fp_kind: function_param_kind;
-    fp_newtypes: string loc list;
-      (** [fp_newtypes] are the new type declarations that come *after* that
-          parameter. The newtypes that come before the first parameter are
-          placed as exp_extras on the Texp_function node. This is just used in
-          {!Untypeast}. *)
+    fp_sort: Jkind.sort;
+    fp_mode: Mode.Alloc.l;
+    fp_curry: function_curry;
+    fp_newtypes: (Ident.t * string loc *
+                  Parsetree.jkind_annotation option * Uid.t) list;
+    (** [fp_newtypes] are the new type declarations that come *after* that
+        parameter. The newtypes that come before the first parameter are
+        placed as exp_extras on the Texp_function node. This is just used in
+        {!Untypeast}.
+
+        The [Ident.t] and [Uid.t] fields are unused by the compiler, but Merlin needs
+        them. Merlin cannot be cleanly patched to include these fields because Merlin
+        must be able to deserialize typedtrees produced by the compiler. Thus, we include
+        them here, as the cost of tracking this additional information is minimal. *)
     fp_loc: Location.t;
-      (** [fp_loc] is the location of the entire value parameter, not including
-          the [fp_newtypes].
-      *)
+    (** [fp_loc] is the location of the entire value parameter, not including
+        the [fp_newtypes].
+    *)
   }
 
 and function_param_kind =
   | Tparam_pat of pattern
   (** [Tparam_pat p] is a non-optional argument with pattern [p]. *)
-  | Tparam_optional_default of pattern * expression
-  (** [Tparam_optional_default (p, e)] is an optional argument [p] with default
-      value [e], i.e. [?x:(p = e)]. If the parameter is of type [a option], the
-      pattern and expression are of type [a]. *)
+  | Tparam_optional_default of pattern * expression * Jkind.sort
+  (** [Tparam_optional_default (p, e, sort)] is an optional argument [p] with
+      default value [e], i.e. [?x:(p = e)]. If the parameter is of type
+      [a option], the pattern and expression are of type [a]. [sort] is the
+      sort of [e]. *)
 
 and function_body =
   | Tfunction_body of expression
-  | Tfunction_cases of
-      { cases: value case list;
-        partial: partial;
-        param: Ident.t;
-        loc: Location.t;
-        exp_extra: exp_extra option;
-        attributes: attributes;
-        (** [attributes] is just used in untypeast. *)
-      }
+  | Tfunction_cases of function_cases
 (** The function body binds a final argument in [Tfunction_cases],
     and this argument is pattern-matched against the cases.
 *)
 
+and function_cases =
+  { fc_cases: value case list;
+    fc_env : Env.t;
+    (** [fc_env] contains entries from all parameters except
+        for the last one being matched by the cases.
+    *)
+    fc_arg_mode: Mode.Alloc.l;
+    fc_arg_sort: Jkind.sort;
+    fc_ret_type : Types.type_expr;
+    fc_partial: partial;
+    fc_param: Ident.t;
+    fc_param_debug_uid : Shape.Uid.t;
+    fc_loc: Location.t;
+    fc_exp_extra: exp_extra option;
+    fc_attributes: attributes;
+    (** [fc_attributes] is just used in untypeast. *)
+  }
+
+and ident_kind =
+  | Id_value
+  | Id_prim of Mode.Locality.l option * Jkind.Sort.t option
+
+and meth =
+    Tmeth_name of string
+  | Tmeth_val of Ident.t
+  | Tmeth_ancestor of Ident.t * Path.t
+
+and block_access =
+  | Baccess_field of Longident.t loc * Types.label_description
+  | Baccess_array of {
+      mut: mutable_flag;
+      index_kind: index_kind;
+      index: expression;
+      base_ty: Types.type_expr;
+      elt_ty: Types.type_expr;
+      elt_sort: Jkind.Sort.t
+    }
+  | Baccess_block of mutable_flag * expression
+
+and unboxed_access =
+  | Uaccess_unboxed_field of Longident.t loc * Types.unboxed_label_description
+
+and comprehension =
+  {
+    comp_body : expression;
+    comp_clauses : comprehension_clause list
+  }
+
+and comprehension_clause =
+  | Texp_comp_for of comprehension_clause_binding list
+  | Texp_comp_when of expression
+
+and comprehension_clause_binding =
+  {
+    comp_cb_iterator : comprehension_iterator;
+    comp_cb_attributes : attribute list
+    (** No built-in attributes are meaningful here; this would correspond to
+        [[body for[@attr] x in xs]], and there are no built-in attributes that
+        would be efficacious there.  (The only ones that might make sense would
+        be inlining, but you can't do that with list/array items that are being
+        iterated over.) *)
+  }
+  (** We move the pattern into the [comprehension_iterator], compared to the
+      untyped syntax tree, so that range-based iterators can have just an
+      identifier instead of a full pattern *)
+
+and comprehension_iterator =
+  | Texp_comp_range of
+      { ident     : Ident.t
+      ; ident_debug_uid : Shape.Uid.t
+      ; pattern   : Parsetree.pattern (** Redundant with [ident] *)
+      ; start     : expression
+      ; stop      : expression
+      ; direction : direction_flag }
+  | Texp_comp_in of
+      { pattern  : pattern
+      ; sequence : expression }
+
+and 'k case =
+    {
+     c_lhs: 'k general_pattern;
+     c_guard: expression option;
+     c_rhs: expression;
+    }
+
 and record_label_definition =
-  | Kept of Types.type_expr * mutable_flag
+  | Kept of Types.type_expr * Types.mutability * unique_use
   | Overridden of Longident.t loc * expression
 
 and binding_op =
@@ -367,9 +685,30 @@ and binding_op =
     bop_op_type : Types.type_expr;
     (* This is the type at which the operator was used.
        It is always an instance of [bop_op_val.val_type] *)
+    bop_op_return_sort : Jkind.sort;
     bop_exp : expression;
+    bop_exp_sort : Jkind.sort;
     bop_loc : Location.t;
   }
+
+(* See Note [Type-checking applications] in Typecore *)
+and ('a, 'b) arg_or_omitted =
+  | Arg of 'a (* an argument actually passed to a function *)
+  | Omitted of 'b (* an argument not passed due to partial application *)
+
+and omitted_parameter =
+  { mode_closure : Mode.Alloc.r;
+    mode_arg : Mode.Alloc.l;
+    mode_ret : Mode.Alloc.l;
+    sort_arg : Jkind.sort;
+    sort_ret : Jkind.sort }
+
+and apply_arg = (expression * Jkind.sort, omitted_parameter) arg_or_omitted
+
+and apply_position =
+  | Tail          (* must be tail-call optimised *)
+  | Nontail       (* must not be tail-call optimised *)
+  | Default       (* tail-call optimised if in tail position *)
 
 (* Value expressions for the class language *)
 
@@ -388,7 +727,7 @@ and class_expr_desc =
   | Tcl_fun of
       arg_label * pattern * (Ident.t * expression) list
       * class_expr * partial
-  | Tcl_apply of class_expr * (arg_label * expression option) list
+  | Tcl_apply of class_expr * (arg_label * apply_arg) list
   | Tcl_let of rec_flag * value_binding list *
                   (Ident.t * expression) list * class_expr
   | Tcl_constraint of
@@ -427,12 +766,23 @@ and class_field_desc =
   | Tcf_initializer of expression
   | Tcf_attribute of attribute
 
+and held_locks = Env.locks * Longident.t * Location.t
+
+and mode_with_locks = Mode.Value.l * held_locks option
+
 (* Value expressions for the module language *)
 
 and module_expr =
   { mod_desc: module_expr_desc;
     mod_loc: Location.t;
     mod_type: Types.module_type;
+    mod_mode : mode_with_locks;
+    (** The mode of the module. The second component is [Some] if [hold_locks]
+    is requested and the module is an identifier. *)
+    (* CR zqian: currently we mode-check bottom-up instead of top-down, in align
+    with the type-checking of modules. They are aligned because module type
+    inclusion check is modal. In the future both should be top-down for better
+    error messages. *)
     mod_env: Env.t;
     mod_attributes: attributes;
    }
@@ -446,6 +796,8 @@ and module_type_constraint =
 
 and functor_parameter =
   | Unit
+  (* CR sspies: We should add an additional [debug_uid] here to support functor
+     arguments in the debugger. *)
   | Named of Ident.t option * string option loc * module_type
 
 and module_expr_desc =
@@ -475,7 +827,7 @@ and structure_item =
   }
 
 and structure_item_desc =
-    Tstr_eval of expression * attributes
+    Tstr_eval of expression * Jkind.sort * attributes
   | Tstr_value of rec_flag * value_binding list
   | Tstr_primitive of value_description
   | Tstr_type of rec_flag * type_declaration list
@@ -506,6 +858,7 @@ and value_binding =
     vb_pat: pattern;
     vb_expr: expression;
     vb_rec_kind: Value_rec_types.recursive_binding_kind;
+    vb_sort: Jkind.sort;
     vb_attributes: attributes;
     vb_loc: Location.t;
   }
@@ -545,19 +898,24 @@ and module_type_desc =
   | Tmty_with of module_type * (Path.t * Longident.t loc * with_constraint) list
   | Tmty_typeof of module_expr
   | Tmty_alias of Path.t * Longident.t loc
+  | Tmty_strengthen of module_type * Path.t * Longident.t loc
 
 and primitive_coercion =
   {
     pc_desc: Primitive.description;
     pc_type: Types.type_expr;
+    pc_poly_mode: Mode.Locality.l option;
+    pc_poly_sort: Jkind.Sort.t option;
     pc_env: Env.t;
     pc_loc : Location.t;
   }
 
 and signature = {
   sig_items : signature_item list;
+  sig_modalities : Mode.Modality.Const.t;
   sig_type : Types.signature;
   sig_final_env : Env.t;
+  sig_sloc : Location.t;
 }
 
 and signature_item =
@@ -577,7 +935,7 @@ and signature_item_desc =
   | Tsig_modtype of module_type_declaration
   | Tsig_modtypesubst of module_type_declaration
   | Tsig_open of open_description
-  | Tsig_include of include_description
+  | Tsig_include of include_description * Mode.Modality.Const.t
   | Tsig_class of class_description list
   | Tsig_class_type of class_type_declaration list
   | Tsig_attribute of attribute
@@ -589,6 +947,7 @@ and module_declaration =
      md_uid: Uid.t;
      md_presence: Types.module_presence;
      md_type: module_type;
+     md_modalities: Mode.Modality.t;
      md_attributes: attributes;
      md_loc: Location.t;
     }
@@ -628,12 +987,19 @@ and open_description = (Path.t * Longident.t loc) open_infos
 
 and open_declaration = module_expr open_infos
 
+and include_kind =
+  | Tincl_structure
+  | Tincl_functor of (Ident.t * module_coercion) list
+      (* S1 -> S2 *)
+  | Tincl_gen_functor of (Ident.t * module_coercion) list
+      (* S1 -> () -> S2 *)
 
 and 'a include_infos =
     {
      incl_mod: 'a;
      incl_type: Types.signature;
      incl_loc: Location.t;
+     incl_kind: include_kind;
      incl_attributes: attribute list;
     }
 
@@ -660,18 +1026,23 @@ and core_type =
    }
 
 and core_type_desc =
-    Ttyp_any
-  | Ttyp_var of string
+  | Ttyp_var of string option * Parsetree.jkind_annotation option
   | Ttyp_arrow of arg_label * core_type * core_type
-  | Ttyp_tuple of core_type list
+  | Ttyp_tuple of (string option * core_type) list
+  | Ttyp_unboxed_tuple of (string option * core_type) list
   | Ttyp_constr of Path.t * Longident.t loc * core_type list
   | Ttyp_object of object_field list * closed_flag
   | Ttyp_class of Path.t * Longident.t loc * core_type list
-  | Ttyp_alias of core_type * string loc
+  | Ttyp_alias of core_type * string loc option *
+                  Parsetree.jkind_annotation option
   | Ttyp_variant of row_field list * closed_flag * label list option
-  | Ttyp_poly of string list * core_type
+  | Ttyp_poly of (string * Parsetree.jkind_annotation option) list * core_type
   | Ttyp_package of package_type
   | Ttyp_open of Path.t * Longident.t loc * core_type
+  | Ttyp_of_kind of Parsetree.jkind_annotation
+  | Ttyp_call_pos
+      (** [Ttyp_call_pos] represents the type of the value of a Position
+          argument ([lbl:[%call_pos] -> ...]). *)
 
 and package_type = {
   pack_path : Path.t;
@@ -722,12 +1093,14 @@ and type_declaration =
     typ_manifest: core_type option;
     typ_loc: Location.t;
     typ_attributes: attributes;
+    typ_jkind_annotation: Parsetree.jkind_annotation option;
    }
 
 and type_kind =
     Ttype_abstract
   | Ttype_variant of constructor_declaration list
   | Ttype_record of label_declaration list
+  | Ttype_record_unboxed_product of label_declaration list
   | Ttype_open
 
 and label_declaration =
@@ -735,7 +1108,8 @@ and label_declaration =
      ld_id: Ident.t;
      ld_name: string loc;
      ld_uid: Uid.t;
-     ld_mutable: mutable_flag;
+     ld_mutable: Types.mutability;
+     ld_modalities: Mode.Modality.Const.t;
      ld_type: core_type;
      ld_loc: Location.t;
      ld_attributes: attributes;
@@ -746,15 +1120,22 @@ and constructor_declaration =
      cd_id: Ident.t;
      cd_name: string loc;
      cd_uid: Uid.t;
-     cd_vars: string loc list;
+     cd_vars: (string * Parsetree.jkind_annotation option) list;
      cd_args: constructor_arguments;
      cd_res: core_type option;
      cd_loc: Location.t;
      cd_attributes: attributes;
     }
 
+and constructor_argument =
+  {
+    ca_modalities: Mode.Modality.Const.t;
+    ca_type: core_type;
+    ca_loc: Location.t;
+  }
+
 and constructor_arguments =
-  | Cstr_tuple of core_type list
+  | Cstr_tuple of constructor_argument list
   | Cstr_record of label_declaration list
 
 and type_extension =
@@ -786,7 +1167,9 @@ and extension_constructor =
   }
 
 and extension_constructor_kind =
-    Text_decl of string loc list * constructor_arguments * core_type option
+    Text_decl of (string * Parsetree.jkind_annotation option) list *
+                 constructor_arguments *
+                 core_type option
   | Text_rebind of Path.t * Longident.t loc
 
 and class_type =
@@ -846,10 +1229,20 @@ and 'a class_infos =
     ci_attributes: attributes;
    }
 
+type argument_interface = {
+  ai_signature: Types.signature;
+  ai_coercion_from_primary: module_coercion;
+}
+(** For a module [M] compiled with [-as-argument-for P] for some parameter
+    module [P], the signature of [P] along with the coercion from [M]'s
+    exported signature (the _primary interface_) to [P]'s signature (the
+    _argument interface_). *)
+
 type implementation = {
   structure: structure;
   coercion: module_coercion;
   signature: Types.signature;
+  argument_interface: argument_interface option;
   shape: Shape.t;
 }
 (** A typechecked implementation including its module structure, its exported
@@ -860,6 +1253,10 @@ type implementation = {
 
     If there isn't one, the signature will be inferred from the module
     structure.
+
+    If the module is compiled with [-as-argument-for] and is thus typechecked
+    against the .mli for a parameter in addition to its own .mli, it has an
+    additional signature stored in [argument_interface].
 *)
 
 type item_declaration =
@@ -909,8 +1306,24 @@ val exists_pattern: (pattern -> bool) -> pattern -> bool
 
 val let_bound_idents: value_binding list -> Ident.t list
 val let_bound_idents_full:
-    value_binding list ->
-    (Ident.t * string loc * Types.type_expr * Types.Uid.t) list
+    value_binding list -> (Ident.t * string loc * Types.type_expr * Uid.t) list
+
+(* [let_bound_idents_with_modes_sorts_and_checks] finds all the idents in the
+   let bindings and computes their modes, sorts, and whether they have any check
+   attributes (zero_alloc).
+
+   Note that:
+   * The list associated with each ident can only have more than one element in
+     the case of or pattern, where the ident is bound on both sides.
+   * We return just one check_attribute per identifier, because this attribute
+     can only be something other than [Default_check] in the case of a simple
+     variable pattern bound to a function (in which case the list will also
+     have just one element).
+*)
+val let_bound_idents_with_modes_sorts_and_checks:
+  value_binding list
+  -> (Ident.t * (Location.t * Mode.Value.l * Jkind.sort) list
+              * Zero_alloc.t) list
 
 (** Alpha conversion of patterns *)
 val alpha_pat:
@@ -921,8 +1334,8 @@ val mkloc: 'a -> Location.t -> 'a Asttypes.loc
 
 val pat_bound_idents: 'k general_pattern -> Ident.t list
 val pat_bound_idents_full:
-  'k general_pattern ->
-  (Ident.t * string loc * Types.type_expr * Types.Uid.t) list
+  'k general_pattern
+  -> (Ident.t * string loc * Types.type_expr * Types.Uid.t * Jkind.Sort.Const.t) list
 
 (** Splits an or pattern into its value (left) and exception (right) parts. *)
 val split_pattern:
@@ -931,6 +1344,19 @@ val split_pattern:
 (** Whether an expression looks nice as the subject of a sentence in a error
     message. *)
 val exp_is_nominal : expression -> bool
+
+(** Calculates the syntactic arity of a function based on its parameters and body. *)
+val function_arity : function_param list -> function_body -> int
+
+(** Given a declaration, return the location of the bound identifier *)
+val loc_of_decl : uid:Shape.Uid.t -> item_declaration -> string Location.loc
+
+(** When type checking F(M).t, which does not involve modes, we say F(M) is of
+    the strongest mode, to avoid modes in error messages. *)
+val min_mode_with_locks : mode_with_locks
+
+(** Get the mode, asserting no held locks. *)
+val mode_without_locks_exn : mode_with_locks -> Mode.Value.l
 
 (* Merlin specific *)
 

@@ -77,21 +77,27 @@ type node =
   | Open_description of open_description
   | Open_declaration of open_declaration
   | Method_call of expression * meth * Location.t
-  | Record_field of
+  | Record_field :
       [ `Expression of expression | `Pattern of pattern ]
-      * Types.label_description
+      * 'rep Types.gen_label_description
+      * 'rep Types.record_form
       * Longident.t Location.loc
+      -> node
   | Module_binding_name of module_binding
   | Module_declaration_name of module_declaration
   | Module_type_declaration_name of module_type_declaration
+  | Mode of Parsetree.mode Location.loc
+  | Modality of Parsetree.modality Location.loc
+  | Jkind_annotation of Parsetree.jkind_annotation
+  | Attribute of attribute
 
 let node_update_env env0 = function
   | Pattern { pat_env = env }
   | Expression { exp_env = env }
   | Class_expr { cl_env = env }
   | Method_call ({ exp_env = env }, _, _)
-  | Record_field (`Expression { exp_env = env }, _, _)
-  | Record_field (`Pattern { pat_env = env }, _, _)
+  | Record_field (`Expression { exp_env = env }, _, _, _)
+  | Record_field (`Pattern { pat_env = env }, _, _, _)
   | Module_expr { mod_env = env }
   | Module_type { mty_env = env }
   | Structure_item (_, env)
@@ -132,13 +138,17 @@ let node_update_env env0 = function
   | Include_declaration _
   | Open_description _
   | Open_declaration _
-  | Binding_op _ -> env0
+  | Binding_op _
+  | Mode _
+  | Modality _
+  | Jkind_annotation _
+  | Attribute _ -> env0
 
 let node_real_loc loc0 = function
   | Expression { exp_loc = loc }
   | Pattern { pat_loc = loc }
   | Method_call (_, _, loc)
-  | Record_field (_, _, { loc })
+  | Record_field (_, _, _, { loc })
   | Class_expr { cl_loc = loc }
   | Module_expr { mod_loc = loc }
   | Structure_item ({ str_loc = loc }, _)
@@ -164,7 +174,11 @@ let node_real_loc loc0 = function
   | Include_declaration { incl_loc = loc }
   | Open_description { open_loc = loc }
   | Open_declaration { open_loc = loc }
-  | Binding_op { bop_op_name = { loc } } -> loc
+  | Binding_op { bop_op_name = { loc } }
+  | Mode { loc }
+  | Modality { loc }
+  | Jkind_annotation { pjkind_loc = loc }
+  | Attribute { attr_name = { loc } } -> loc
   | Module_type_declaration_name { mtd_name = loc } -> loc.Location.loc
   | Module_declaration_name { md_name = loc }
   | Module_binding_name { mb_name = loc } -> loc.Location.loc
@@ -188,7 +202,7 @@ let node_attributes = function
   | Class_expr cl -> cl.cl_attributes
   | Class_field cf -> cf.cf_attributes
   | Module_expr me -> me.mod_attributes
-  | Structure_item ({ str_desc = Tstr_eval (_, attr) }, _) -> attr
+  | Structure_item ({ str_desc = Tstr_eval (_, _, attr) }, _) -> attr
   | Structure_item ({ str_desc = Tstr_attribute a }, _) -> [ a ]
   | Signature_item ({ sig_desc = Tsig_attribute a }, _) -> [ a ]
   | Module_binding mb -> mb.mb_attributes
@@ -213,8 +227,8 @@ let node_attributes = function
   | Class_description ci -> ci.ci_attributes
   | Class_type_declaration ci -> ci.ci_attributes
   | Method_call (obj, _, _) -> obj.exp_attributes
-  | Record_field (`Expression obj, _, _) -> obj.exp_attributes
-  | Record_field (`Pattern obj, _, _) -> obj.pat_attributes
+  | Record_field (`Expression obj, _, _, _) -> obj.exp_attributes
+  | Record_field (`Pattern obj, _, _, _) -> obj.pat_attributes
   | _ -> []
 
 let has_attr ~name node =
@@ -283,12 +297,17 @@ let option_fold f' o env (f : _ f0) acc =
 
 let of_core_type ct = app (Core_type ct)
 
+let of_jkind_annotation jkind = app (Jkind_annotation jkind)
+
+let of_jkind_annotation_opt jkind = option_fold of_jkind_annotation jkind
+
 let of_exp_extra (exp, _, _) =
   match exp with
   | Texp_constraint ct -> of_core_type ct
   | Texp_coerce (cto, ct) -> of_core_type ct ** option_fold of_core_type cto
   | Texp_poly cto -> option_fold of_core_type cto
-  | Texp_newtype' _ | Texp_newtype _ -> id_fold
+  | Texp_newtype (_, _, jkind, _) -> of_jkind_annotation_opt jkind
+  | Texp_stack | Texp_mode _ -> id_fold
 let of_expression e = app (Expression e) ** list_fold of_exp_extra e.exp_extra
 
 let of_pat_extra (pat, _, _) =
@@ -305,38 +324,62 @@ let of_value_binding vb = app (Value_binding vb)
 let of_module_type mt = app (Module_type mt)
 let of_module_expr me = app (Module_expr me)
 let of_typ_param (ct, _) = of_core_type ct
+let of_constructor_arg arg = of_core_type arg.ca_type
 let of_constructor_arguments = function
-  | Cstr_tuple cts -> list_fold of_core_type cts
+  | Cstr_tuple cts -> list_fold of_constructor_arg cts
   | Cstr_record lbls -> list_fold of_label_declaration lbls
 
 let of_bop ({ bop_exp; _ } as bop) =
   app (Binding_op bop) ** of_expression bop_exp
 
-let of_record_field obj loc lbl env (f : _ f0) acc =
-  app (Record_field (obj, lbl, loc)) env f acc
+let of_record_field obj loc lbl form env (f : _ f0) acc =
+  app (Record_field (obj, lbl, form, loc)) env f acc
 
-let of_exp_record_field obj lid_loc lbl =
-  of_record_field (`Expression obj) lid_loc lbl
+let of_exp_record_field obj lid_loc lbl form =
+  of_record_field (`Expression obj) lid_loc lbl form
 
-let of_pat_record_field obj loc lbl = of_record_field (`Pattern obj) loc lbl
+let of_pat_record_field obj loc lbl form =
+  of_record_field (`Pattern obj) loc lbl form
+
+let of_comprehension_clause_binding { comp_cb_iterator; _ } =
+  match comp_cb_iterator with
+  | Texp_comp_range { start; stop; _ } ->
+    of_expression start ** of_expression stop
+  | Texp_comp_in { pattern; sequence } ->
+    of_pattern pattern ** of_expression sequence
+
+let of_comprehension_clause = function
+  | Texp_comp_for bindings -> list_fold of_comprehension_clause_binding bindings
+  | Texp_comp_when e -> of_expression e
+
+let of_comprehension { comp_body; comp_clauses } =
+  of_expression comp_body ** list_fold of_comprehension_clause comp_clauses
 
 let of_pattern_desc (type k) (desc : k pattern_desc) =
   match desc with
   | Tpat_any | Tpat_var _ | Tpat_constant _ | Tpat_variant (_, None, _) ->
     id_fold
-  | Tpat_alias (p, _, _, _)
+  | Tpat_alias (p, _, _, _, _, _, _)
   | Tpat_variant (_, Some p, _)
   | Tpat_lazy p
   | Tpat_exception p -> of_pattern p
   | Tpat_value p -> of_pattern (p :> value general_pattern)
-  | Tpat_tuple ps | Tpat_construct (_, _, ps, None) | Tpat_array ps ->
+  | Tpat_tuple ps -> list_fold (fun (_lbl, p) -> of_pattern p) ps
+  | Tpat_unboxed_tuple ps -> list_fold (fun (_lbl, p, _sort) -> of_pattern p) ps
+  | Tpat_construct (_, _, ps, None) | Tpat_array (_, _, ps) ->
     list_fold of_pattern ps
-  | Tpat_construct (_, _, ps, Some (_, ct)) ->
+  | Tpat_construct (_, _, ps, Some (jkinds, ct)) ->
     list_fold of_pattern ps ** of_core_type ct
+    ** list_fold (fun (_, jkind) -> of_jkind_annotation_opt jkind) jkinds
   | Tpat_record (ls, _) ->
     list_fold
       (fun (lid_loc, desc, p) ->
-        of_pat_record_field p lid_loc desc ** of_pattern p)
+        of_pat_record_field p lid_loc desc Legacy ** of_pattern p)
+      ls
+  | Tpat_record_unboxed_product (ls, _) ->
+    list_fold
+      (fun (lid_loc, desc, p) ->
+        of_pat_record_field p lid_loc desc Unboxed_product ** of_pattern p)
       ls
   | Tpat_or (p1, p2, _) -> of_pattern p1 ** of_pattern p2
 
@@ -346,47 +389,78 @@ let of_method_call obj meth loc env (f : _ f0) acc =
   let loc = { loc with Location.loc_start; loc_end } in
   app (Method_call (obj, meth, loc)) env f acc
 
+let of_block_access = function
+  | Baccess_field (_, _) -> id_fold
+  | Baccess_array
+      { mut = _; index_kind = _; index; base_ty = _; elt_ty = _; elt_sort = _ }
+    -> of_expression index
+  | Baccess_block (_, exp) -> of_expression exp
+
+let of_unboxed_access = function
+  | Uaccess_unboxed_field (_, _) -> id_fold
+
 let rec of_expression_desc loc = function
-  | Texp_ident _ | Texp_constant _ | Texp_instvar _
+  | Texp_ident _ | Texp_constant _ | Texp_instvar _ | Texp_mutvar _
   | Texp_variant (_, None)
-  | Texp_new _ | Texp_typed_hole -> id_fold
+  | Texp_new _ | Texp_src_pos | Texp_typed_hole -> id_fold
   | Texp_let (_, vbs, e) -> of_expression e ** list_fold of_value_binding vbs
-  | Texp_function (params, body) ->
+  | Texp_letmutable (vb, e) -> of_expression e ** of_value_binding vb
+  | Texp_function { params; body; _ } ->
     list_fold of_function_param params ** of_function_body body
-  | Texp_apply (e, ls) ->
+  | Texp_apply (e, ls, _, _, _) ->
     of_expression e
     ** list_fold
          (function
-           | _, None -> id_fold
-           | _, Some e -> of_expression e)
+           | _, Omitted _ -> id_fold
+           | _, Arg (e, _) -> of_expression e)
          ls
-  | Texp_match (e, cs, vs, _) ->
-    of_expression e ** list_fold of_case cs ** list_fold of_case vs
-  | Texp_try (e, cs, _) -> of_expression e ** list_fold of_case cs
-  | Texp_tuple es | Texp_construct (_, _, es) | Texp_array es ->
+  | Texp_match (e, _, cs, _) -> of_expression e ** list_fold of_case cs
+  | Texp_try (e, cs) -> of_expression e ** list_fold of_case cs
+  | Texp_tuple (es, _) -> list_fold (fun (_lbl, e) -> of_expression e) es
+  | Texp_unboxed_tuple es ->
+    list_fold (fun (_lbl, e, _sort) -> of_expression e) es
+  | Texp_construct (_, _, es, _) | Texp_array (_, _, es, _) ->
     list_fold of_expression es
-  | Texp_variant (_, Some e)
+  | Texp_variant (_, Some (e, _))
   | Texp_assert (e, _)
   | Texp_lazy e
   | Texp_setinstvar (_, _, _, e) -> of_expression e
+  | Texp_setmutvar (_, _, e) -> of_expression e
   | Texp_record { fields; extended_expression } ->
-    option_fold of_expression extended_expression
+    option_fold (fun (e, _, _) -> of_expression e) extended_expression
     **
     let fold_field = function
       | _, Typedtree.Kept _ -> id_fold
       | desc, Typedtree.Overridden (lid_loc, e) ->
-        of_exp_record_field e lid_loc desc ** of_expression e
+        of_exp_record_field e lid_loc desc Legacy ** of_expression e
     in
     array_fold fold_field fields
-  | Texp_field (e, lid_loc, lbl) ->
-    of_expression e ** of_exp_record_field e lid_loc lbl
-  | Texp_setfield (e1, lid_loc, lbl, e2) ->
-    of_expression e1 ** of_expression e2 ** of_exp_record_field e1 lid_loc lbl
-  | Texp_ifthenelse (e1, e2, None) | Texp_sequence (e1, e2) | Texp_while (e1, e2)
-    -> of_expression e1 ** of_expression e2
-  | Texp_ifthenelse (e1, e2, Some e3) | Texp_for (_, _, e1, e2, _, e3) ->
+  | Texp_record_unboxed_product { fields; extended_expression } ->
+    option_fold (fun (e, _) -> of_expression e) extended_expression
+    **
+    let fold_field = function
+      | _, Typedtree.Kept _ -> id_fold
+      | desc, Typedtree.Overridden (lid_loc, e) ->
+        of_exp_record_field e lid_loc desc Unboxed_product ** of_expression e
+    in
+    array_fold fold_field fields
+  | Texp_field (e, _, lid_loc, lbl, _, _) ->
+    of_expression e ** of_exp_record_field e lid_loc lbl Legacy
+  | Texp_unboxed_field (e, _, lid_loc, lbl, _) ->
+    of_expression e ** of_exp_record_field e lid_loc lbl Unboxed_product
+  | Texp_setfield (e1, _, lid_loc, lbl, e2) ->
+    of_expression e1 ** of_expression e2
+    ** of_exp_record_field e1 lid_loc lbl Legacy
+  | Texp_ifthenelse (e1, e2, None)
+  | Texp_sequence (e1, _, e2)
+  | Texp_while { wh_cond = e1; wh_body = e2; _ }
+  | Texp_overwrite (e1, e2) -> of_expression e1 ** of_expression e2
+  | Texp_ifthenelse (e1, e2, Some e3)
+  | Texp_for { for_from = e1; for_to = e2; for_body = e3; _ } ->
     of_expression e1 ** of_expression e2 ** of_expression e3
-  | Texp_send (e, meth) ->
+  | Texp_list_comprehension cs | Texp_array_comprehension (_, _, cs) ->
+    of_comprehension cs
+  | Texp_send (e, meth, _) ->
     of_expression e ** of_method_call e meth loc (* TODO ulysse CHECK*)
   | Texp_override (_, ls) -> list_fold (fun (_, _, e) -> of_expression e) ls
   | Texp_letmodule (mb_id, mb_name, mb_presence, mb_expr, e) ->
@@ -413,7 +487,7 @@ let rec of_expression_desc loc = function
        the patterns patN when they are tuples themselves. *)
     let rec flatten_patterns ~size acc pat =
       match pat.pat_desc with
-      | Tpat_tuple [ tuple; pat ] when size > 0 ->
+      | Tpat_tuple [ (None, tuple); (None, pat) ] when size > 0 ->
         flatten_patterns ~size:(size - 1) (pat :: acc) tuple
       | _ -> List.rev (pat :: acc)
     in
@@ -423,16 +497,34 @@ let rec of_expression_desc loc = function
     list_fold of_letop (List.combine patterns bindops)
     ** of_expression body.c_rhs
   | Texp_open (od, e) -> app (Module_expr od.open_expr) ** of_expression e
+  | Texp_probe p -> of_expression p.handler
+  | Texp_probe_is_enabled _ -> id_fold
+  | Texp_exclave e -> of_expression e
+  | Texp_idx (block_access, unboxed_access) ->
+    of_block_access block_access ** list_fold of_unboxed_access unboxed_access
+  | Texp_atomic_loc (exp, _, _, _, _) -> of_expression exp
+  | Texp_hole _ -> id_fold
 
-and of_function_param fp = of_function_param_kind fp.fp_kind
+(* We should consider taking into account param.fp_loc at some point, as it
+   allows us to respond with the *parameter*'s type (as opposed to the
+   function's type) when the user queries the label:
+
+   let f ?y:(x = 3) () = x
+         ^
+*)
+and of_function_param fp =
+  of_function_param_kind fp.fp_kind
+  ** list_fold
+       (fun (_, _, jkind, _) -> of_jkind_annotation_opt jkind)
+       fp.fp_newtypes
 
 and of_function_param_kind = function
   | Tparam_pat pat -> of_pattern pat
-  | Tparam_optional_default (pat, exp) -> of_pattern pat ** of_expression exp
+  | Tparam_optional_default (pat, exp, _) -> of_pattern pat ** of_expression exp
 
 and of_function_body = function
   | Tfunction_body exp -> of_expression exp
-  | Tfunction_cases fc -> list_fold of_case fc.cases
+  | Tfunction_cases fc -> list_fold of_case fc.fc_cases
 
 and of_class_expr_desc = function
   | Tcl_ident (_, _, cts) -> list_fold of_core_type cts
@@ -443,8 +535,8 @@ and of_class_expr_desc = function
   | Tcl_apply (ce, es) ->
     list_fold
       (function
-        | _, None -> id_fold
-        | _, Some e -> of_expression e)
+        | _, Omitted _ -> id_fold
+        | _, Arg (e, _) -> of_expression e)
       es
     ** app (Class_expr ce)
   | Tcl_let (_, vbs, es, ce) ->
@@ -477,7 +569,7 @@ and of_module_expr_desc = function
   | Tmod_typed_hole -> id_fold
 
 and of_structure_item_desc = function
-  | Tstr_eval (e, _) -> of_expression e
+  | Tstr_eval (e, _, _) -> of_expression e
   | Tstr_value (_, vbs) -> list_fold of_value_binding vbs
   | Tstr_primitive vd -> app (Value_description vd)
   | Tstr_type (_, tds) -> list_fold (fun td -> app (Type_declaration td)) tds
@@ -495,6 +587,8 @@ and of_structure_item_desc = function
 
 and of_module_type_desc = function
   | Tmty_ident _ | Tmty_alias _ -> id_fold
+  (* CR module strengthening: need to also fold on the module expression *)
+  | Tmty_strengthen (mty, _, _) -> of_module_type mty
   | Tmty_signature sg -> app (Signature sg)
   | Tmty_functor (Named (_, _, mt1), mt2) ->
     of_module_type mt1 ** of_module_type mt2
@@ -514,7 +608,7 @@ and of_signature_item_desc = function
   | Tsig_module md -> app (Module_declaration md)
   | Tsig_recmodule mds -> list_fold (fun md -> app (Module_declaration md)) mds
   | Tsig_modtype mtd -> app (Module_type_declaration mtd)
-  | Tsig_include i -> app (Include_description i)
+  | Tsig_include (i, _modality) -> app (Include_description i)
   | Tsig_class cds -> list_fold (fun cd -> app (Class_description cd)) cds
   | Tsig_class_type ctds ->
     list_fold (fun ctd -> app (Class_type_declaration ctd)) ctds
@@ -529,10 +623,14 @@ and of_signature_item_desc = function
     id_fold
 
 and of_core_type_desc = function
-  | Ttyp_any | Ttyp_var _ -> id_fold
+  | Ttyp_var (_, jkind) -> of_jkind_annotation_opt jkind
+  | Ttyp_call_pos -> id_fold
+  | Ttyp_of_kind jkind -> of_jkind_annotation jkind
   | Ttyp_open (_, _, ct) -> of_core_type ct
   | Ttyp_arrow (_, ct1, ct2) -> of_core_type ct1 ** of_core_type ct2
-  | Ttyp_tuple cts | Ttyp_constr (_, _, cts) | Ttyp_class (_, _, cts) ->
+  | Ttyp_tuple cts -> list_fold (fun (_, ty) -> of_core_type ty) cts
+  | Ttyp_unboxed_tuple cts -> list_fold (fun (_, ty) -> of_core_type ty) cts
+  | Ttyp_constr (_, _, cts) | Ttyp_class (_, _, cts) ->
     list_fold of_core_type cts
   | Ttyp_object (cts, _) ->
     list_fold
@@ -540,7 +638,11 @@ and of_core_type_desc = function
         match of_.of_desc with
         | OTtag (_, ct) | OTinherit ct -> of_core_type ct)
       cts
-  | Ttyp_poly (_, ct) | Ttyp_alias (ct, _) -> of_core_type ct
+  | Ttyp_poly (bindings, ct) ->
+    list_fold (fun (_, jkind) -> of_jkind_annotation_opt jkind) bindings
+    ** of_core_type ct
+  | Ttyp_alias (ct, _, jkind) ->
+    of_core_type ct ** of_jkind_annotation_opt jkind
   | Ttyp_variant (rfs, _, _) -> list_fold (fun rf -> app (Row_field rf)) rfs
   | Ttyp_package pt -> app (Package_type pt)
 
@@ -556,115 +658,153 @@ and of_class_type_field_desc = function
   | Tctf_constraint (ct1, ct2) -> of_core_type ct1 ** of_core_type ct2
   | Tctf_attribute _ -> id_fold
 
-let of_node = function
-  | Dummy -> id_fold
-  | Pattern { pat_desc; pat_extra = _ } -> of_pattern_desc pat_desc
-  | Expression { exp_desc; exp_extra = _; exp_loc } ->
-    of_expression_desc exp_loc exp_desc
-  | Case { c_lhs; c_cont = Some (id, vd); c_guard; c_rhs } ->
-    let name = Ident.name id in
-    let cont_pat =
-      { pat_desc = Tpat_var (id, { txt = name; loc = vd.val_loc }, vd.val_uid);
-        pat_loc = vd.val_loc;
-        pat_extra = [];
-        pat_type = vd.val_type;
-        pat_env = c_rhs.exp_env;
-        pat_attributes = []
-      }
-    in
-    of_pattern c_lhs ** of_expression c_rhs ** of_pattern cont_pat
-    ** option_fold of_expression c_guard
-  | Case { c_lhs; c_cont = None; c_guard; c_rhs } ->
-    of_pattern c_lhs ** of_expression c_rhs ** option_fold of_expression c_guard
-  | Class_expr { cl_desc } -> of_class_expr_desc cl_desc
-  | Class_structure { cstr_self; cstr_fields } ->
-    of_pattern cstr_self ** list_fold (fun f -> app (Class_field f)) cstr_fields
-  | Class_field { cf_desc } -> of_class_field_desc cf_desc
-  | Class_field_kind (Tcfk_virtual ct) -> of_core_type ct
-  | Class_field_kind (Tcfk_concrete (_, e)) -> of_expression e
-  | Module_expr { mod_desc } -> of_module_expr_desc mod_desc
-  | Module_type_constraint Tmodtype_implicit -> id_fold
-  | Module_type_constraint (Tmodtype_explicit mt) -> of_module_type mt
-  | Structure { str_items; str_final_env } ->
-    list_fold_with_next
-      (fun next item ->
-        match next with
-        | None -> app (Structure_item (item, str_final_env))
-        | Some item' -> app (Structure_item (item, item'.str_env)))
-      str_items
-  | Structure_item ({ str_desc }, _) -> of_structure_item_desc str_desc
-  | Module_binding mb ->
-    app (Module_expr mb.mb_expr) ** app (Module_binding_name mb)
-  | Value_binding { vb_pat; vb_expr } ->
-    of_pattern vb_pat ** of_expression vb_expr
-  | Module_type { mty_desc } -> of_module_type_desc mty_desc
-  | Signature { sig_items; sig_final_env } ->
-    list_fold_with_next
-      (fun next item ->
-        match next with
-        | None -> app (Signature_item (item, sig_final_env))
-        | Some item' -> app (Signature_item (item, item'.sig_env)))
-      sig_items
-  | Signature_item ({ sig_desc }, _) -> of_signature_item_desc sig_desc
-  | Module_declaration md ->
-    of_module_type md.md_type ** app (Module_declaration_name md)
-  | Module_type_declaration mtd ->
-    option_fold of_module_type mtd.mtd_type
-    ** app (Module_type_declaration_name mtd)
-  | With_constraint (Twith_type td | Twith_typesubst td) ->
-    app (Type_declaration td)
-  | With_constraint (Twith_module _ | Twith_modsubst _) -> id_fold
-  | With_constraint (Twith_modtype mt | Twith_modtypesubst mt) ->
-    of_module_type mt
-  | Core_type { ctyp_desc } -> of_core_type_desc ctyp_desc
-  | Package_type { pack_fields } ->
-    list_fold (fun (_, ct) -> of_core_type ct) pack_fields
-  | Row_field rf -> begin
-    match rf.rf_desc with
-    | Ttag (_, _, cts) -> list_fold of_core_type cts
-    | Tinherit ct -> of_core_type ct
-  end
-  | Value_description { val_desc } -> of_core_type val_desc
-  | Type_declaration { typ_params; typ_cstrs; typ_kind; typ_manifest } ->
-    let of_typ_cstrs (ct1, ct2, _) = of_core_type ct1 ** of_core_type ct2 in
-    option_fold of_core_type typ_manifest
-    ** list_fold of_typ_param typ_params
-    ** app (Type_kind typ_kind)
-    ** list_fold of_typ_cstrs typ_cstrs
-  | Type_kind (Ttype_abstract | Ttype_open) -> id_fold
-  | Type_kind (Ttype_variant cds) ->
-    list_fold (fun cd -> app (Constructor_declaration cd)) cds
-  | Type_kind (Ttype_record lds) -> list_fold of_label_declaration lds
-  | Type_extension { tyext_params; tyext_constructors } ->
-    list_fold of_typ_param tyext_params
-    ** list_fold (fun ec -> app (Extension_constructor ec)) tyext_constructors
-  | Extension_constructor { ext_kind = Text_decl (_, carg, cto) } ->
-    option_fold of_core_type cto ** of_constructor_arguments carg
-  | Extension_constructor { ext_kind = Text_rebind _ } -> id_fold
-  | Label_declaration { ld_type } -> of_core_type ld_type
-  | Constructor_declaration { cd_args; cd_res } ->
-    option_fold of_core_type cd_res ** of_constructor_arguments cd_args
-  | Class_type { cltyp_desc } -> of_class_type_desc cltyp_desc
-  | Class_signature { csig_self; csig_fields } ->
-    of_core_type csig_self
-    ** list_fold (fun x -> app (Class_type_field x)) csig_fields
-  | Class_type_field { ctf_desc } -> of_class_type_field_desc ctf_desc
-  | Class_declaration { ci_params; ci_expr } ->
-    app (Class_expr ci_expr) ** list_fold of_typ_param ci_params
-  | Class_description { ci_params; ci_expr } ->
-    app (Class_type ci_expr) ** list_fold of_typ_param ci_params
-  | Class_type_declaration { ci_params; ci_expr } ->
-    app (Class_type ci_expr) ** list_fold of_typ_param ci_params
-  | Method_call _ -> id_fold
-  | Record_field _ -> id_fold
-  | Module_binding_name _ -> id_fold
-  | Module_declaration_name _ -> id_fold
-  | Module_type_declaration_name _ -> id_fold
-  | Open_description _ -> id_fold
-  | Open_declaration od -> app (Module_expr od.open_expr)
-  | Include_declaration i -> of_module_expr i.incl_mod
-  | Include_description i -> of_module_type i.incl_mod
-  | Binding_op { bop_exp = _ } -> id_fold
+let of_mode mode = app (Mode mode)
+
+let of_modality modality = app (Modality modality)
+
+let of_jkind_annotation_desc : Parsetree.jkind_annotation_desc -> _ =
+  let of_core_type (_ : Parsetree.core_type) =
+    (* CR-someday: Replace [Parsetree.jkind_annotation] with a version where types are
+       [Typedtree.core_type]s rather than [Parsetree.core_type]s. Then use the proper
+       [of_core_type] that's defined in this module above.
+    *)
+    id_fold
+  in
+  function
+  | Default | Abbreviation _ -> id_fold
+  | Mod (jkind, modes) -> of_jkind_annotation jkind ** list_fold of_mode modes
+  | With (jkind, ct, modalities) ->
+    of_jkind_annotation jkind ** of_core_type ct
+    ** list_fold of_modality modalities
+  | Kind_of ct -> of_core_type ct
+  | Product jkinds -> list_fold of_jkind_annotation jkinds
+
+let of_attribute (attr : attribute) =
+  let name = attr.attr_name.txt in
+  (* There are a number of attributes that start with "merlin." that either modify Merlin
+     behavior (ex: merlin.loc, merlin.hide, merlin.focus) or deal with the type-checker's
+     error recovery (ex: merlin.incorrect). Including these attributes in the browse tree
+     causes Merlin to sometimes choose an incorrect node. These attributes are also
+     uninteresting - in practice they don't appear in user-written code. *)
+  match String.is_prefixed name ~by:"merlin." with
+  | true -> id_fold
+  | false -> app (Attribute attr)
+
+let of_node node =
+  let without_attributes =
+    match node with
+    | Dummy -> id_fold
+    | Pattern { pat_desc; pat_extra = _ } -> of_pattern_desc pat_desc
+    | Expression { exp_desc; exp_extra = _; exp_loc } ->
+      of_expression_desc exp_loc exp_desc
+    | Case { c_lhs; c_guard; c_rhs } ->
+      of_pattern c_lhs ** of_expression c_rhs
+      ** option_fold of_expression c_guard
+    | Class_expr { cl_desc } -> of_class_expr_desc cl_desc
+    | Class_structure { cstr_self; cstr_fields } ->
+      of_pattern cstr_self
+      ** list_fold (fun f -> app (Class_field f)) cstr_fields
+    | Class_field { cf_desc } -> of_class_field_desc cf_desc
+    | Class_field_kind (Tcfk_virtual ct) -> of_core_type ct
+    | Class_field_kind (Tcfk_concrete (_, e)) -> of_expression e
+    | Module_expr { mod_desc } -> of_module_expr_desc mod_desc
+    | Module_type_constraint Tmodtype_implicit -> id_fold
+    | Module_type_constraint (Tmodtype_explicit mt) -> of_module_type mt
+    | Structure { str_items; str_final_env } ->
+      list_fold_with_next
+        (fun next item ->
+          match next with
+          | None -> app (Structure_item (item, str_final_env))
+          | Some item' -> app (Structure_item (item, item'.str_env)))
+        str_items
+    | Structure_item ({ str_desc }, _) -> of_structure_item_desc str_desc
+    | Module_binding mb ->
+      app (Module_expr mb.mb_expr) ** app (Module_binding_name mb)
+    | Value_binding { vb_pat; vb_expr } ->
+      of_pattern vb_pat ** of_expression vb_expr
+    | Module_type { mty_desc } -> of_module_type_desc mty_desc
+    | Signature { sig_items; sig_final_env } ->
+      list_fold_with_next
+        (fun next item ->
+          match next with
+          | None -> app (Signature_item (item, sig_final_env))
+          | Some item' -> app (Signature_item (item, item'.sig_env)))
+        sig_items
+    | Signature_item ({ sig_desc }, _) -> of_signature_item_desc sig_desc
+    | Module_declaration md ->
+      of_module_type md.md_type ** app (Module_declaration_name md)
+    | Module_type_declaration mtd ->
+      option_fold of_module_type mtd.mtd_type
+      ** app (Module_type_declaration_name mtd)
+    | With_constraint (Twith_type td | Twith_typesubst td) ->
+      app (Type_declaration td)
+    | With_constraint (Twith_module _ | Twith_modsubst _) -> id_fold
+    | With_constraint (Twith_modtype mt | Twith_modtypesubst mt) ->
+      of_module_type mt
+    | Core_type { ctyp_desc } -> of_core_type_desc ctyp_desc
+    | Package_type { pack_fields } ->
+      list_fold (fun (_, ct) -> of_core_type ct) pack_fields
+    | Row_field rf -> begin
+      match rf.rf_desc with
+      | Ttag (_, _, cts) -> list_fold of_core_type cts
+      | Tinherit ct -> of_core_type ct
+    end
+    | Value_description { val_desc } -> of_core_type val_desc
+    | Type_declaration
+        { typ_params; typ_cstrs; typ_kind; typ_manifest; typ_jkind_annotation }
+      ->
+      let of_typ_cstrs (ct1, ct2, _) = of_core_type ct1 ** of_core_type ct2 in
+      option_fold of_core_type typ_manifest
+      ** list_fold of_typ_param typ_params
+      ** app (Type_kind typ_kind)
+      ** list_fold of_typ_cstrs typ_cstrs
+      ** of_jkind_annotation_opt typ_jkind_annotation
+    | Type_kind (Ttype_abstract | Ttype_open) -> id_fold
+    | Type_kind (Ttype_variant cds) ->
+      list_fold (fun cd -> app (Constructor_declaration cd)) cds
+    | Type_kind (Ttype_record lds)
+    | Type_kind (Ttype_record_unboxed_product lds) ->
+      list_fold of_label_declaration lds
+    | Type_extension { tyext_params; tyext_constructors } ->
+      list_fold of_typ_param tyext_params
+      ** list_fold (fun ec -> app (Extension_constructor ec)) tyext_constructors
+    | Extension_constructor { ext_kind = Text_decl (cvars, carg, cto) } ->
+      option_fold of_core_type cto
+      ** of_constructor_arguments carg
+      ** list_fold (fun (_, jkind) -> of_jkind_annotation_opt jkind) cvars
+    | Extension_constructor { ext_kind = Text_rebind _ } -> id_fold
+    | Label_declaration { ld_type } -> of_core_type ld_type
+    | Constructor_declaration { cd_args; cd_res; cd_vars } ->
+      option_fold of_core_type cd_res
+      ** of_constructor_arguments cd_args
+      ** list_fold (fun (_, jkind) -> of_jkind_annotation_opt jkind) cd_vars
+    | Class_type { cltyp_desc } -> of_class_type_desc cltyp_desc
+    | Class_signature { csig_self; csig_fields } ->
+      of_core_type csig_self
+      ** list_fold (fun x -> app (Class_type_field x)) csig_fields
+    | Class_type_field { ctf_desc } -> of_class_type_field_desc ctf_desc
+    | Class_declaration { ci_params; ci_expr } ->
+      app (Class_expr ci_expr) ** list_fold of_typ_param ci_params
+    | Class_description { ci_params; ci_expr } ->
+      app (Class_type ci_expr) ** list_fold of_typ_param ci_params
+    | Class_type_declaration { ci_params; ci_expr } ->
+      app (Class_type ci_expr) ** list_fold of_typ_param ci_params
+    | Method_call _ -> id_fold
+    | Record_field _ -> id_fold
+    | Module_binding_name _ -> id_fold
+    | Module_declaration_name _ -> id_fold
+    | Module_type_declaration_name _ -> id_fold
+    | Open_description _ -> id_fold
+    | Open_declaration od -> app (Module_expr od.open_expr)
+    | Include_declaration i -> of_module_expr i.incl_mod
+    | Include_description i -> of_module_type i.incl_mod
+    | Binding_op { bop_exp = _ } -> id_fold
+    | Mode _ -> id_fold
+    | Modality _ -> id_fold
+    | Jkind_annotation { pjkind_desc } -> of_jkind_annotation_desc pjkind_desc
+    | Attribute _ -> id_fold
+  in
+  without_attributes ** list_fold of_attribute (node_attributes node)
 
 let fold_node f env node acc = of_node node env f acc
 
@@ -720,6 +860,10 @@ let string_of_node = function
   | Open_declaration _ -> "open_declaration"
   | Include_description _ -> "include_description"
   | Include_declaration _ -> "include_declaration"
+  | Mode _ -> "mode"
+  | Modality _ -> "modality"
+  | Jkind_annotation _ -> "jkind_annotation"
+  | Attribute _ -> "attribute"
 
 let mkloc = Location.mkloc
 let reloc txt loc = { loc with Location.txt }
@@ -744,9 +888,9 @@ let pattern_paths (type k) { Typedtree.pat_desc; pat_extra; _ } =
     match (pat_desc : k pattern_desc) with
     | Tpat_construct (lid_loc, { Types.cstr_name; cstr_res; _ }, _, _) ->
       fake_path lid_loc cstr_res cstr_name
-    | Tpat_var (id, { Location.loc; txt }, _uid) ->
+    | Tpat_var (id, { Location.loc; txt }, _, _, _) ->
       [ (mkloc (Path.Pident id) loc, Some (Longident.Lident txt)) ]
-    | Tpat_alias (_, id, loc, _uid) ->
+    | Tpat_alias (_, id, loc, _, _, _, _) ->
       [ (reloc (Path.Pident id) loc, Some (Longident.Lident loc.txt)) ]
     | _ -> []
   in
@@ -771,10 +915,10 @@ let bindop_path { bop_op_name; bop_op_path } =
 let expression_paths { Typedtree.exp_desc; exp_extra; _ } =
   let init =
     match exp_desc with
-    | Texp_ident (path, loc, _) -> [ (reloc path loc, Some loc.txt) ]
+    | Texp_ident (path, loc, _, _, _) -> [ (reloc path loc, Some loc.txt) ]
     | Texp_letop { let_; ands } ->
       bindop_path let_ :: List.map ~f:bindop_path ands
-    | Texp_new (path, loc, _) -> [ (reloc path loc, Some loc.txt) ]
+    | Texp_new (path, loc, _, _) -> [ (reloc path loc, Some loc.txt) ]
     | Texp_instvar (_, path, loc) -> [ (reloc path loc, Some (Lident loc.txt)) ]
     | Texp_setinstvar (_, path, loc, _) ->
       [ (reloc path loc, Some (Lident loc.txt)) ]
@@ -785,7 +929,8 @@ let expression_paths { Typedtree.exp_desc; exp_extra; _ } =
         ps
     | Texp_letmodule (Some id, loc, _, _, _) ->
       [ (reloc (Path.Pident id) loc, Option.map ~f:mk_lident loc.txt) ]
-    | Texp_for (id, { Parsetree.ppat_loc = loc; ppat_desc }, _, _, _, _) ->
+    | Texp_for
+        { for_id = id; for_pat = { Parsetree.ppat_loc = loc; ppat_desc }; _ } ->
       let lid =
         match ppat_desc with
         | Ppat_any -> None
@@ -793,14 +938,25 @@ let expression_paths { Typedtree.exp_desc; exp_extra; _ } =
         | _ -> assert false
       in
       [ (mkloc (Path.Pident id) loc, lid) ]
-    | Texp_construct (lid_loc, { Types.cstr_name; cstr_res; _ }, _) ->
+    | Texp_construct (lid_loc, { Types.cstr_name; cstr_res; _ }, _, _) ->
       fake_path lid_loc cstr_res cstr_name
     | Texp_open (od, _) -> module_expr_paths od.open_expr
+    (* Normally, [expression_paths] just works at top-level, without
+       going deep into an expression. But freshly bound newtypes are
+       not part of any other expression or pattern or type, so they
+       need to be retrieved here. *)
+    | Texp_function { params; _ } ->
+      List.concat_map params ~f:(fun { fp_newtypes; _ } ->
+          List.concat_map fp_newtypes
+            ~f:(fun (id, (label_loc : _ Location.loc), _, _) ->
+              let path = Path.Pident id in
+              let lid = Longident.Lident label_loc.txt in
+              [ (mkloc path label_loc.loc, Some lid) ]))
     | _ -> []
   in
   List.fold_left ~init exp_extra ~f:(fun acc (extra, _, _) ->
       match extra with
-      | Texp_newtype' (id, label_loc, _) ->
+      | Texp_newtype (id, label_loc, _, _) ->
         let path = Path.Pident id in
         let lid = Longident.Lident label_loc.txt in
         (mkloc path label_loc.loc, Some lid) :: acc
@@ -895,7 +1051,7 @@ let node_paths_full =
   | Class_declaration ci -> ci_paths ci
   | Class_description ci -> ci_paths ci
   | Class_type_declaration ci -> ci_paths ci
-  | Record_field (_, { Types.lbl_res; lbl_name; _ }, lid_loc) ->
+  | Record_field (_, { Types.lbl_res; lbl_name; _ }, _, lid_loc) ->
     fake_path lid_loc lbl_res lbl_name
   | _ -> []
 
@@ -908,7 +1064,7 @@ let node_paths_and_longident t =
 let node_is_constructor = function
   | Constructor_declaration decl ->
     Some { decl.cd_name with Location.txt = `Declaration decl }
-  | Expression { exp_desc = Texp_construct (loc, desc, _) } ->
+  | Expression { exp_desc = Texp_construct (loc, desc, _, _) } ->
     Some { loc with Location.txt = `Description desc }
   | Pattern { pat_desc = Tpat_construct (loc, desc, _, _) } ->
     Some { loc with Location.txt = `Description desc }

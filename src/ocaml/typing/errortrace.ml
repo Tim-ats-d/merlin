@@ -115,6 +115,11 @@ type ('a, 'variety) elt =
   | First_class_module: first_class_module -> ('a,_) elt
   (* Unification & Moregen; included in Equality for simplicity *)
   | Rec_occur : type_expr * type_expr -> ('a, _) elt
+  | Bad_jkind : type_expr * Jkind.Violation.t -> ('a, _) elt
+  | Bad_jkind_sort : type_expr * Jkind.Violation.t -> ('a, _) elt
+  | Unequal_var_jkinds :
+      type_expr * jkind_lr * type_expr * jkind_lr -> ('a, _) elt
+  | Unequal_tof_kind_jkinds : jkind_lr * jkind_lr -> ('a, _) elt
 
 type ('a, 'variety) t = ('a, 'variety) elt list
 
@@ -132,8 +137,11 @@ let map_elt (type variety) f : ('a, variety) elt -> ('b, variety) elt = function
       Escape { kind = Equation (f x); context }
   | Escape {kind = (Univ _ | Self | Constructor _ | Module_type _ | Constraint);
             _}
-  | Variant _ | Obj _ | Function_label_mismatch _ | Incompatible_fields _
-  | Rec_occur (_, _) | First_class_module _  as x -> x
+  | Variant _ | Obj _ | Incompatible_fields _ | Rec_occur (_, _) as x -> x
+  | Bad_jkind _ as x -> x
+  | Bad_jkind_sort _ as x -> x
+  | Unequal_var_jkinds _ as x -> x
+  | Unequal_tof_kind_jkinds _ as x -> x
 
 let map f t = List.map (map_elt f) t
 

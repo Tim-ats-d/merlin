@@ -21,8 +21,35 @@
     CMI files are made of marshalled types.
 *)
 
+open Allowance
+
 (** Asttypes exposes basic definitions shared both by Parsetree and Types. *)
 open Asttypes
+
+(** Whether or not a mutable field is atomic *)
+type atomic =
+  | Nonatomic
+  | Atomic
+
+(** Describes a mutable field/element. *)
+type mutability =
+  | Immutable
+  | Mutable of
+      { mode : Mode.Value.Comonadic.lr
+        (** Mode of new field value in mutation. *)
+      ; atomic : atomic
+      }
+
+(** Returns [true] is the [mutable_flag] is mutable or atomic. Should be called
+    if not interested in the payload of [Mutable]. *)
+val is_mutable : mutability -> bool
+
+(** Returns [true] is the [mutable_flag] is atomic. Should be called
+    if not interested in the payload of [Mutable]. *)
+val is_atomic : mutability -> bool
+
+(** Given the parameter [m0] on mutable, return the mode of future writes. *)
+val mutable_mode : ('l * 'r) Mode.Value.Comonadic.t -> ('l * 'r) Mode.Value.t
 
 (** Type expressions for the core language.
 
@@ -55,26 +82,92 @@ open Asttypes
 
     Note on mutability: TBD.
  *)
+
+(** The mod-bounds of a jkind *)
+module Jkind_mod_bounds : sig
+  module Crossing = Mode.Crossing
+  module Externality = Jkind_axis.Externality
+  module Nullability = Jkind_axis.Nullability
+  module Separability = Jkind_axis.Separability
+
+  type t
+
+  val create :
+    Crossing.t->
+    externality:Externality.t ->
+    nullability:Nullability.t ->
+    separability:Separability.t ->
+    t
+
+  val crossing : t -> Crossing.t
+  val externality : t -> Externality.t
+  val nullability : t -> Nullability.t
+  val separability : t -> Separability.t
+
+  val set_crossing : Crossing.t -> t -> t
+  val set_externality : Externality.t -> t -> t
+  val set_nullability : Nullability.t -> t -> t
+  val set_separability : Separability.t -> t -> t
+
+  (** [set_max_in_set bounds axes] sets all the axes in [axes] to their [max] within
+      [bounds] *)
+  val set_max_in_set : t -> Jkind_axis.Axis_set.t -> t
+
+  (** [set_min_in_set bounds axes] sets all the axes in [axes] to their [min] within
+      [bounds] *)
+  val set_min_in_set : t -> Jkind_axis.Axis_set.t -> t
+
+  (** [is_max_within_set bounds axes] returns whether or not all the axes in [axes] are
+      [max] within [bounds] *)
+  val is_max_within_set : t -> Jkind_axis.Axis_set.t -> bool
+  val is_max : t -> bool
+
+  val debug_print : Format.formatter -> t -> unit
+end
+
+
+(** Information tracked about an individual type within the with-bounds for a jkind *)
+module With_bounds_type_info : sig
+  (** The axes that the with-bound applies to *)
+  type t = { relevant_axes : Jkind_axis.Axis_set.t } [@@unboxed]
+end
+
 type type_expr
 type row_desc
 type row_field
 type field_kind
 type commutable
 
-type type_desc =
-  | Tvar of string option
+and type_desc =
+  | Tvar of { name : string option; jkind : jkind_lr }
   (** [Tvar (Some "a")] ==> ['a] or ['_a]
       [Tvar None]       ==> [_] *)
 
-  | Tarrow of arg_label * type_expr * type_expr * commutable
+  | Tarrow of arrow_desc * type_expr * type_expr * commutable
   (** [Tarrow (Nolabel,      e1, e2, c)] ==> [e1    -> e2]
       [Tarrow (Labelled "l", e1, e2, c)] ==> [l:e1  -> e2]
       [Tarrow (Optional "l", e1, e2, c)] ==> [?l:e1 -> e2]
 
-      See [commutable] for the last argument. *)
+      See [commutable] for the last argument. The argument
+      type must be a [Tpoly] node *)
 
-  | Ttuple of type_expr list
-  (** [Ttuple [t1;...;tn]] ==> [(t1 * ... * tn)] *)
+  | Ttuple of (string option * type_expr) list
+  (** [Ttuple [None, t1; ...; None, tn]] ==> [t1 * ... * tn]
+      [Ttuple [Some "l1", t1; ...; Some "ln", tn]] ==> [l1:t1 * ... * ln:tn]
+
+      Any mix of labeled and unlabeled components also works:
+      [Ttuple [Some "l1", t1; None, t2; Some "l3", t3]] ==> [l1:t1 * t2 * l3:t3]
+  *)
+
+  | Tunboxed_tuple of (string option * type_expr) list
+  (** [Tunboxed_tuple [None, t1; ...; None, tn]] ==> [#(t1 * ... * tn)]
+      [Tunboxed_tuple [Some "l1", t1; ...; Some "ln", tn]]
+                  ==> [#(l1:t1 * ... * ln:tn)]
+
+      Any mix of labeled and unlabeled components also works:
+      [Tunboxed_tuple [Some "l1", t1; None, t2; Some "l3", t3]]
+           ==> [#(l1:t1 * t2 * l3:t3)]
+  *)
 
   | Tconstr of Path.t * type_expr list * abbrev_memo ref
   (** [Tconstr (`A.B.t', [t1;...;tn], _)] ==> [(t1,...,tn) A.B.t]
@@ -120,7 +213,7 @@ type type_desc =
   | Tvariant of row_desc
   (** Representation of polymorphic variants, see [row_desc]. *)
 
-  | Tunivar of string option
+  | Tunivar of { name : string option; jkind : jkind_lr }
   (** Occurrence of a type variable introduced by a
       forall quantifier / [Tpoly]. *)
 
@@ -132,11 +225,38 @@ type type_desc =
   | Tpackage of Path.t * (Longident.t * type_expr) list
   (** Type of a first-class module (a.k.a package). *)
 
+  | Tof_kind of jkind_lr
+  (** [Tof_kind jkind] ==> [(type : jkind)]
+
+      The "canonical" type of a particular kind.
+
+      These types are uninhabited, and any appearing in translation will cause an error.
+      They are only used to represent the kinds of existentially-quantified types
+      mentioned in with-bounds. See test typing-jkind-bounds/gadt.ml *)
+
+(** This is used in the Typedtree. It is distinct from
+    {{!Asttypes.arg_label}[arg_label]} because Position argument labels are
+    discovered through typechecking. *)
+and arg_label =
+  | Nolabel
+  | Labelled of string (** [label:T -> ...] *)
+  | Optional of string (** [?label:T -> ...] *)
+  | Position of string (** [label:[%call_pos] -> ...] *)
+
+and arrow_desc =
+  arg_label * Mode.Alloc.lr * Mode.Alloc.lr
+
+
+
+(** See also documentation for [row_more], which enumerates how these
+    constructors arise. *)
 and fixed_explanation =
   | Univar of type_expr (** The row type was bound to an univar *)
   | Fixed_private (** The row type is private *)
   | Reified of Path.t (** The row was reified *)
   | Rigid (** The row type was made rigid during constraint verification *)
+  | Fixed_existential (** The row type is existential in a with-bound.
+                      See Note [With-bounds for GADTs] in Jkind. *)
 
 (** [abbrev_memo] allows one to keep track of different expansions of a type
     alias. This is done for performance purposes.
@@ -186,6 +306,106 @@ and abbrev_memo =
     in an order different from other calls.
     This is only allowed when the real type is known.
 *)
+
+
+(**** Jkinds ****)
+
+(** A history of conditions placed on a jkind.
+
+   INVARIANT: at most one sort variable appears in this history.
+   This is a natural consequence of producing this history by comparing
+   jkinds.
+*)
+and jkind_history =
+  | Interact of
+      { reason : Jkind_intf.History.interact_reason;
+        jkind1 : jkind_desc_packed;
+        history1 : jkind_history;
+        jkind2 : jkind_desc_packed;
+        history2 : jkind_history
+      }
+  | Creation of Jkind_intf.History.creation_reason
+
+(** The types within the with-bounds of a jkind *)
+and with_bounds_types
+
+and 'd with_bounds =
+  | No_with_bounds : ('l * 'r) with_bounds
+  | With_bounds
+    : with_bounds_types -> ('l * Allowance.disallowed) with_bounds
+    (** Invariant : there must always be at least one type in this set **)
+
+and ('layout, 'd) layout_and_axes =
+  { layout : 'layout;
+    mod_bounds : Jkind_mod_bounds.t;
+    with_bounds : 'd with_bounds
+  }
+  constraint 'd = 'l * 'r
+
+and 'd jkind_desc = (Jkind_types.Sort.t Jkind_types.Layout.t, 'd) layout_and_axes
+  constraint 'd = 'l * 'r
+
+and jkind_desc_packed = Pack_jkind_desc : ('l * 'r) jkind_desc -> jkind_desc_packed
+
+(** The "quality" of a jkind indicates whether we are able to learn more about the jkind
+    later.
+
+    We can never learn more about a [Best] jkind to make it "lower" (according to
+    [Jkind.sub] / [Jkind.sub_jkind_l]). A [Not_best], jkind, however, might have more
+    information provided about it later that makes it lower.
+
+    Note that only left jkinds can be [Best] (meaning we can never compare less than or
+    equal to a left jkind!)
+*)
+and 'd jkind_quality =
+  | Best : ('l * disallowed) jkind_quality
+  | Not_best : ('l * 'r) jkind_quality
+
+and 'd jkind =
+  { jkind : 'd jkind_desc;
+    annotation : Parsetree.jkind_annotation option;
+    history : jkind_history;
+    has_warned : bool;
+    ran_out_of_fuel_during_normalize : bool;
+    quality : 'd jkind_quality;
+  }
+  constraint 'd = 'l * 'r
+
+and jkind_l = (allowed * disallowed) jkind  (* the jkind of an actual type *)
+and jkind_r = (disallowed * allowed) jkind  (* the jkind expected of a type *)
+and jkind_lr = (allowed * allowed) jkind    (* the jkind of a variable *)
+and jkind_packed = Pack_jkind : ('l * 'r) jkind -> jkind_packed
+
+(* A map from [type_expr] to [With_bounds_type_info.t], specifically defined with a
+   (best-effort) semantic comparison function on types to be used in the with-bounds of a
+   jkind.
+
+   This module is defined internally to be equal (via two uses of [Obj.magic]) to the
+   abstract type [with_bound_types] to break the circular dependency between with-bounds
+   and type_expr. The alternative to this approach would be mutually recursive modules,
+   but this approach creates a smaller diff with upstream and makes rebasing easier.
+*)
+module With_bounds_types : sig
+  (* Note that only the initially needed bits of [Stdlib.Map.S] are exposed here; feel
+     free to expose more functions if you need them! *)
+  type t = with_bounds_types
+  type info := With_bounds_type_info.t
+
+  val empty : t
+  val is_empty : t -> bool
+  val to_seq : t -> (type_expr * info) Seq.t
+  val of_list : (type_expr * info) list -> t
+  val of_seq : (type_expr * info) Seq.t -> t
+  val singleton : type_expr -> info -> t
+  val map : (info -> info) -> t -> t
+  val merge
+    : (type_expr -> info option -> info option -> info option) ->
+    t -> t -> t
+  val update : type_expr -> (info option -> info option) -> t -> t
+  val find_opt : type_expr -> t -> info option
+  val for_all : (type_expr -> info -> bool) -> t -> bool
+  val map_with_key : (type_expr -> info -> type_expr * info) -> t -> t
+end
 
 val is_commu_ok: commutable -> bool
 val commu_ok: commutable
@@ -326,9 +546,57 @@ val create_row:
   name:(Path.t * type_expr list) option -> row_desc
 
 val row_fields: row_desc -> (label * row_field) list
+
+(** [row_more] returns a [type_expr] with one of the following [type_desc]s
+    (also described with the return from [row_fixed], which varies similarly):
+
+    * [Tvar]: This is a row variable; it would occur in e.g. [val f :
+    [> `A | `B] -> int]. When/if we learn more about a polymorphic variant, this
+    variable might get unified with one of the other [type_desc]s listed here,
+    or a [Tvariant] that represents a new set of constructors to add to the row.
+
+    During [constraint] checking (toward the end of checking a type declaration,
+    in [Typedecl.check_constraints_rec]) we [Ctype.rigidify] a type to make it
+    so that its unification variables will not unify. When a [Tvar] row variable
+    is rigidified, its [fixed_explanation] will be [Rigid].
+
+    * [Tunivar]: This is a universally quantified row variable; it would occur
+    in e.g. [type t = { f : 'a. ([> `A | `B ] as 'a) -> int }]. A [Tunivar] has
+    a [fixed_explanation] of [Univar].
+
+    * [Tconstr]: There are two possible ways this can happen:
+
+      1. This is an abstract [#row] type created by a [private] row type, as in
+      [type t = private [> `A | `B]]. In this case, the [fixed_explanation] will
+      be [Fixed_private].
+
+      2. This is a locally abstract type created by [Ctype.reify], which happens
+      when a row variable is free in the type of the scrutinee in a GADT pattern
+      match. The [fixed_explanation] will be [Reified]. Note that any manifest
+      of a reified row variable is actually ignored by [row_repr]; this causes
+      some incompletness in type inference.
+
+    * [Tnil]: Used to denote a static polymorphic variant (with no [>] or [<]).
+
+    * [Tof_kind]: See Wrinkle BW2 in Note [With-bounds for GADTs] in Jkind.
+    Briefly, [Tof_kind] can appear as a [row_more] when computing the kind
+    of a GADT with an existentially-bound row variable. The [fixed_explanation]
+    will be [Fixed_existential].
+
+    ----------------------------------------
+
+    It is an invariant that row variables are never shared between different
+    types. That is, if [row_more row1 == row_more row2], then [row1] and [row2]
+    come from structurally identical [Tvariant]s (but they might not be
+    physically equal). When copying types, two types with the same [row_more]
+    field are replaced by the same copy.
+*)
 val row_more: row_desc -> type_expr
 val row_closed: row_desc -> bool
+
+(** See documentation for [row_more]. *)
 val row_fixed: row_desc -> fixed_explanation option
+
 val row_name: row_desc -> (Path.t * type_expr list) option
 
 val set_row_name: row_desc -> (Path.t * type_expr list) option -> row_desc
@@ -388,16 +656,10 @@ module Vars  : Map.S with type key = string
 
 (* Value descriptions *)
 
-type value_description =
-  { val_type: type_expr;                (* Type of the value *)
-    val_kind: value_kind;
-    val_loc: Location.t;
-    val_attributes: Parsetree.attributes;
-    val_uid: Uid.t;
-  }
-
-and value_kind =
+type value_kind =
     Val_reg                             (* Regular value *)
+  | Val_mut of Mode.Value.Comonadic.lr * Jkind_types.Sort.t
+                                        (* Mutable variable *)
   | Val_prim of Primitive.description   (* Primitive *)
   | Val_ivar of mutable_flag * string   (* Instance variable (mutable ?) *)
   | Val_self of class_signature * self_meths * Ident.t Vars.t * string
@@ -491,6 +753,19 @@ type type_declaration =
   { type_params: type_expr list;
     type_arity: int;
     type_kind: type_decl_kind;
+
+    type_jkind: jkind_l;
+    (* for an abstract decl kind or for [@@unboxed] types: this is the stored
+       jkind for the type; expansion might find a type with a more precise
+       jkind. See PR#10017 for motivating examples where subsitution or
+       instantiation may refine the immediacy of a type.
+
+       for other decl kinds: this is a cached jkind, computed from the
+       decl kind. EXCEPTION: if a type's jkind is refined by a gadt equation,
+       the jkind stored here might be a subjkind of the jkind that would
+       be computed from the decl kind. This happens in
+       Ctype.add_jkind_equation. *)
+
     type_private: private_flag;
     type_manifest: type_expr option;
     type_variance: Variance.t list;
@@ -500,19 +775,79 @@ type type_declaration =
     type_expansion_scope: int;
     type_loc: Location.t;
     type_attributes: Parsetree.attributes;
-    type_immediate: Type_immediacy.t;
     type_unboxed_default: bool;
     (* true if the unboxed-ness of this type was chosen by a compiler flag *)
     type_uid: Uid.t;
+    type_unboxed_version : type_declaration option;
+    (* stores the unboxed version of that this type introduces: this is [Some]
+       for predefined types with unboxed versions (e.g. [float]) and boxed
+       records, but [None] for aliases of these types
+
+       invariants:
+       1. there are no "twice-unboxed" types: the [type_declaration] stored here
+          itself has [type_unboxed_version = None].
+       2. the Uid of the unboxed version is [Uid.unboxed_version <uid of boxed>]
+    *)
   }
 
-and type_decl_kind = (label_declaration, constructor_declaration) type_kind
+and type_decl_kind = (label_declaration, label_declaration, constructor_declaration) type_kind
 
-and ('lbl, 'cstr) type_kind =
+and unsafe_mode_crossing =
+  { unsafe_mod_bounds : Mode.Crossing.t
+  ; unsafe_with_bounds : (allowed * disallowed) with_bounds
+  }
+
+and ('lbl, 'lbl_flat, 'cstr) type_kind =
     Type_abstract of type_origin
-  | Type_record of 'lbl list  * record_representation
-  | Type_variant of 'cstr list * variant_representation
+  | Type_record of 'lbl list * record_representation * unsafe_mode_crossing option
+  | Type_record_unboxed_product of
+      'lbl_flat list *
+      record_unboxed_product_representation *
+      unsafe_mode_crossing option
+  | Type_variant of 'cstr list * variant_representation * unsafe_mode_crossing option
   | Type_open
+
+(* CR layouts: after removing the void translation from lambda, we could get rid of
+   this src_index / runtime_tag distinction.  But I am leaving it in because it
+   may not be long before we need it again.
+
+   In particular, lambda will need to do something about computing offsets for
+   block projections when not everything is one word wide, whether that's
+   because of void or because of other jkinds.  One option is to change these
+   projections to be more abstract and pass the jkind information to other
+   stages of the compiler, as is currently done for unboxed projection
+   operations, but at the moment our plan is to do this math in lambda in the
+   case of normal projections from boxes. *)
+and tag = Ordinary of {src_index: int;  (* Unique name (per type) *)
+                       runtime_tag: int}    (* The runtime tag *)
+        | Extension of Path.t
+        | Null (* Null pointer *)
+
+(* A mixed product contains a possibly-empty prefix of values followed by a
+   non-empty suffix of "flat" elements. Intuitively, a flat element is one that
+   need not be scanned by the garbage collector. The front-end allows elements
+   to appear in any order in a record, and later stages of the compiler
+   re-arrange the block. *)
+and mixed_block_element =
+  | Value
+  | Float_boxed
+  (* A [Float_boxed] is a float that's stored flat but boxed upon projection. *)
+  | Float64
+  | Float32
+  | Bits8
+  | Bits16
+  | Untagged_immediate
+  | Bits32
+  | Bits64
+  | Vec128
+  | Vec256
+  | Vec512
+  | Word
+  | Product of mixed_product_shape
+  (* Invariant: the array has at least two things in it. *)
+  | Void
+
+and mixed_product_shape = mixed_block_element array
 
 and type_origin =
     Definition
@@ -520,22 +855,64 @@ and type_origin =
   | Existential of string
 
 and record_representation =
-    Record_regular                      (* All fields are boxed / tagged *)
-  | Record_float                        (* All fields are floats *)
-  | Record_unboxed of bool    (* Unboxed single-field record, inlined or not *)
-  | Record_inlined of int               (* Inlined record *)
-  | Record_extension of Path.t          (* Inlined record under extension *)
-                             (* The argument is the path of the extension *)
+  | Record_unboxed
+  | Record_inlined of tag * constructor_representation * variant_representation
+  (* For an inlined record, we record the representation of the variant that
+     contains it and the tag/representation of the relevant constructor of that
+     variant. *)
+  | Record_boxed of Jkind_types.Sort.Const.t array
+  | Record_float (* All fields are floats *)
+  | Record_ufloat
+  (* All fields are [float#]s.  Same runtime representation as [Record_float],
+     but operations on these (e.g., projection, update) work with unboxed floats
+     rather than boxed floats. *)
+  | Record_mixed of mixed_product_shape
+  (* The record contains a mix of values and unboxed elements. The block
+     is tagged such that polymorphic operations will not work.
+  *)
+
+and record_unboxed_product_representation =
+  | Record_unboxed_product
+  (* We give all unboxed records the same representation, as their layouts are
+     encapsulated by their label's jkinds. We keep this variant for uniformity with boxed
+     records, and to make it easier to support different representations in the future. *)
 
 and variant_representation =
-    Variant_regular          (* Constant or boxed constructors *)
-  | Variant_unboxed          (* One unboxed single-field constructor *)
+  | Variant_unboxed
+  | Variant_boxed of (constructor_representation *
+                      Jkind_types.Sort.Const.t array) array
+  (* The outer array has an element for each constructor. Each inner array
+     has a jkind for each argument of the corresponding constructor.
+
+     A constructor with an inlined record argument has a length-1 inner array.
+     Its single element is the jkind of the record itself. (It doesn't have a
+     jkind for each field.) However, the constructor representation is about the
+     fields of the record, not the record itself; that is, it will be
+     [Constructor_mixed] if the inlined record has any unboxed fields.
+  *)
+  | Variant_extensible
+  | Variant_with_null
+  (* CR layouts v3.5: A custom variant representation for ['a or_null].
+     Eventually, it should likely be merged into [Variant_unboxed], with
+     [Variant_unboxed] allowing either one ordinary constructor, or one
+     ordinary non-null and one [Null] constructor. *)
+
+and constructor_representation =
+  | Constructor_uniform_value
+  (* A constant constructor or a constructor all of whose fields are values.
+     This is named 'uniform_value' to distinguish from the 'Constructor_uniform'
+     of [lambda.mli], which can also represent all-flat-float records.
+  *)
+  | Constructor_mixed of mixed_product_shape
+  (* A constructor that has some non-value fields. *)
 
 and label_declaration =
   {
     ld_id: Ident.t;
-    ld_mutable: mutable_flag;
+    ld_mutable: mutability;
+    ld_modalities: Mode.Modality.Const.t;
     ld_type: type_expr;
+    ld_sort: Jkind_types.Sort.Const.t;
     ld_loc: Location.t;
     ld_attributes: Parsetree.attributes;
     ld_uid: Uid.t;
@@ -551,15 +928,31 @@ and constructor_declaration =
     cd_uid: Uid.t;
   }
 
+and constructor_argument =
+  {
+    ca_modalities: Mode.Modality.Const.t;
+    ca_type: type_expr;
+    ca_sort: Jkind_types.Sort.Const.t;
+    ca_loc: Location.t;
+  }
+
 and constructor_arguments =
-  | Cstr_tuple of type_expr list
+  | Cstr_tuple of constructor_argument list
   | Cstr_record of label_declaration list
+
+val tys_of_constr_args : constructor_arguments -> type_expr list
+
+(* Returns the inner type and its modalities, if unboxed. *)
+val find_unboxed_type : type_declaration ->
+  (type_expr * Mode.Modality.Const.t) option
 
 type extension_constructor =
   {
     ext_type_path: Path.t;
     ext_type_params: type_expr list;
     ext_args: constructor_arguments;
+    ext_shape: constructor_representation;
+    ext_constant: bool;
     ext_ret_type: type_expr option;
     ext_private: private_flag;
     ext_loc: Location.t;
@@ -607,24 +1000,62 @@ type visibility =
   | Exported
   | Hidden
 
-type module_type =
+type rec_status =
+    Trec_not                   (* first in a nonrecursive group *)
+  | Trec_first                 (* first in a recursive group *)
+  | Trec_next                  (* not first in a recursive/nonrecursive group *)
+
+type ext_status =
+    Text_first                     (* first constructor in an extension *)
+  | Text_next                      (* not first constructor in an extension *)
+  | Text_exception
+
+type module_presence =
+  | Mp_present
+  | Mp_absent
+
+(* Module aliasability for strengthening *)
+module Aliasability : sig
+  type t = Not_aliasable | Aliasable
+
+  val aliasable : bool -> t
+  val is_aliasable : t -> bool
+end
+
+(* Wrap.t encapsulates bits of module types which can be lazy *)
+module type Wrap = sig
+  type 'a t
+end
+
+module type Wrapped = sig
+  type 'a wrapped
+
+  type value_description =
+    { val_type: type_expr wrapped;                (* Type of the value *)
+      val_modalities: Mode.Modality.t;      (* Modalities on the value *)
+      val_kind: value_kind;
+      val_loc: Location.t;
+      val_zero_alloc: Zero_alloc.t;
+      val_attributes: Parsetree.attributes;
+      val_uid: Uid.t;
+    }
+
+  type module_type =
     Mty_ident of Path.t
   | Mty_signature of signature
   | Mty_functor of functor_parameter * module_type
   | Mty_alias of Path.t
+  | Mty_strengthen of module_type * Path.t * Aliasability.t
+      (* See comments about the aliasability of strengthening in mtype.ml *)
   | Mty_for_hole
 
-and functor_parameter =
+  and functor_parameter =
   | Unit
   | Named of Ident.t option * module_type
 
-and module_presence =
-  | Mp_present
-  | Mp_absent
+  and signature = signature_item list wrapped
 
-and signature = signature_item list
-
-and signature_item =
+  and signature_item =
     Sig_value of Ident.t * value_description * visibility
   | Sig_type of Ident.t * type_declaration * rec_status * visibility
   | Sig_typext of Ident.t * extension_constructor * ext_status * visibility
@@ -634,31 +1065,47 @@ and signature_item =
   | Sig_class of Ident.t * class_declaration * rec_status * visibility
   | Sig_class_type of Ident.t * class_type_declaration * rec_status * visibility
 
-and module_declaration =
+  and module_declaration =
   {
     md_type: module_type;
+    md_modalities : Mode.Modality.t;
     md_attributes: Parsetree.attributes;
     md_loc: Location.t;
     md_uid: Uid.t;
   }
 
-and modtype_declaration =
+  and modtype_declaration =
   {
     mtd_type: module_type option;  (* None: abstract *)
     mtd_attributes: Parsetree.attributes;
     mtd_loc: Location.t;
     mtd_uid: Uid.t;
   }
+end
 
-and rec_status =
-    Trec_not                   (* first in a nonrecursive group *)
-  | Trec_first                 (* first in a recursive group *)
-  | Trec_next                  (* not first in a recursive/nonrecursive group *)
+module Make_wrapped(Wrap : Wrap) : Wrapped with type 'a wrapped = 'a Wrap.t
 
-and ext_status =
-    Text_first                     (* first constructor in an extension *)
-  | Text_next                      (* not first constructor in an extension *)
-  | Text_exception
+module Map_wrapped(From : Wrapped)(To : Wrapped) : sig
+  type mapper =
+    {
+      map_signature: mapper -> From.signature -> To.signature;
+      map_type_expr: mapper -> type_expr From.wrapped -> type_expr To.wrapped
+    }
+
+  val value_description :
+    mapper -> From.value_description -> To.value_description
+  val module_declaration :
+    mapper -> From.module_declaration -> To.module_declaration
+  val modtype_declaration :
+    mapper -> From.modtype_declaration -> To.modtype_declaration
+  val module_type : mapper -> From.module_type -> To.module_type
+  val signature : mapper -> From.signature -> To.signature
+  val signature_item : mapper -> From.signature_item -> To.signature_item
+  val functor_parameter :
+    mapper -> From.functor_parameter -> To.functor_parameter
+end
+
+include Wrapped with type 'a wrapped = 'a
 
 val item_visibility : signature_item -> visibility
 
@@ -669,9 +1116,12 @@ type constructor_description =
   { cstr_name: string;                  (* Constructor name *)
     cstr_res: type_expr;                (* Type of the result *)
     cstr_existentials: type_expr list;  (* list of existentials *)
-    cstr_args: type_expr list;          (* Type of the arguments *)
+    cstr_args: constructor_argument list; (* Type of the arguments *)
     cstr_arity: int;                    (* Number of arguments *)
-    cstr_tag: constructor_tag;          (* Tag for heap blocks *)
+    cstr_tag: tag;                      (* Tag for heap blocks *)
+    cstr_repr: variant_representation;  (* Repr of the outer variant *)
+    cstr_shape: constructor_representation; (* Repr of the constructor itself *)
+    cstr_constant: bool;                (* True if all args are void *)
     cstr_consts: int;                   (* Number of constant constructors *)
     cstr_nonconsts: int;                (* Number of non-const constructors *)
     cstr_generalized: bool;             (* Constrained return type? *)
@@ -679,36 +1129,68 @@ type constructor_description =
     cstr_loc: Location.t;
     cstr_attributes: Parsetree.attributes;
     cstr_inlined: type_declaration option;
+      (* [Some decl] here iff the cstr has an inline record (which is decl) *)
     cstr_uid: Uid.t;
    }
 
-and constructor_tag =
-    Cstr_constant of int                (* Constant constructor (an int) *)
-  | Cstr_block of int                   (* Regular constructor (a block) *)
-  | Cstr_unboxed                        (* Constructor of an unboxed type *)
-  | Cstr_extension of Path.t * bool     (* Extension constructor
-                                           true if a constant false if a block*)
-
 (* Constructors are the same *)
-val equal_tag :  constructor_tag -> constructor_tag -> bool
+val equal_tag :  tag -> tag -> bool
+
+(* Comparison of tags to store them in sets. *)
+val compare_tag :  tag -> tag -> int
 
 (* Constructors may be the same, given potential rebinding *)
 val may_equal_constr :
     constructor_description ->  constructor_description -> bool
 
-type label_description =
+(* Equality *)
+
+val equal_record_representation :
+  record_representation -> record_representation -> bool
+
+val equal_record_unboxed_product_representation :
+  record_unboxed_product_representation -> record_unboxed_product_representation -> bool
+
+val equal_variant_representation :
+  variant_representation -> variant_representation -> bool
+
+type 'a gen_label_description =
   { lbl_name: string;                   (* Short name *)
     lbl_res: type_expr;                 (* Type of the result *)
     lbl_arg: type_expr;                 (* Type of the argument *)
-    lbl_mut: mutable_flag;              (* Is this a mutable field? *)
-    lbl_pos: int;                       (* Position in block *)
-    lbl_all: label_description array;   (* All the labels in this type *)
-    lbl_repres: record_representation;  (* Representation for this record *)
+    lbl_mut: mutability;                (* Is this a mutable field? *)
+    lbl_modalities: Mode.Modality.Const.t;
+                                        (* Modalities on the field *)
+    lbl_sort: Jkind_types.Sort.Const.t; (* Sort of the argument *)
+    lbl_pos: int;                       (* Position in type *)
+    lbl_all: 'a gen_label_description array;   (* All the labels in this type *)
+    lbl_repres: 'a;  (* Representation for outer record *)
     lbl_private: private_flag;          (* Read-only field? *)
     lbl_loc: Location.t;
     lbl_attributes: Parsetree.attributes;
     lbl_uid: Uid.t;
   }
+
+type label_description = record_representation gen_label_description
+
+type unboxed_label_description = record_unboxed_product_representation gen_label_description
+
+(** This type tracks the distinction between legacy records ([{ field }]) and unboxed
+    records ([#{ field }]). Note that [Legacy] includes normal boxed records, as well as
+    inlined and [[@@unboxed]] records.
+
+    As a GADT, it also lets us avoid duplicating functions that handle both record forms,
+    such as [Env.find_label_by_name], which has type
+    ['rep record_form -> Longident.t -> Env.t -> 'rep gen_label_description].
+*)
+type _ record_form =
+  | Legacy : record_representation record_form
+  | Unboxed_product : record_unboxed_product_representation record_form
+
+type record_form_packed =
+  | P : _ record_form -> record_form_packed
+
+val record_form_to_string : _ record_form -> string
 
 (** Extracts the list of "value" identifiers bound by a signature.
     "Value" identifiers are identifiers for signature components that
@@ -717,6 +1199,17 @@ type label_description =
 val bound_value_identifiers: signature -> Ident.t list
 
 val signature_item_id : signature_item -> Ident.t
+
+val equal_mixed_block_element :
+  mixed_block_element -> mixed_block_element -> bool
+val compare_mixed_block_element :
+  mixed_block_element -> mixed_block_element -> int
+val mixed_block_element_to_string : mixed_block_element -> string
+val mixed_block_element_to_lowercase_string : mixed_block_element -> string
+
+val equal_unsafe_mode_crossing :
+  type_equal:(type_expr -> type_expr -> bool) ->
+  unsafe_mode_crossing -> unsafe_mode_crossing -> bool
 
 (**** Utilities for backtracking ****)
 
@@ -741,12 +1234,16 @@ val undo_compress: snapshot -> unit
  *)
 
 val link_type: type_expr -> type_expr -> unit
-        (* Set the desc field of [t1] to [Tlink t2], logging the old
-           value if there is an active snapshot *)
+        (* Set the desc field of [t1] to [Tlink t2], logging the old value if
+           there is an active snapshot.  Any jkind information in [t1]'s desc
+           is thrown away without checking - calls to this in unification should
+           first check that [t2]'s jkind is a subjkind of [t1]. *)
 val set_type_desc: type_expr -> type_desc -> unit
         (* Set directly the desc field, without sharing *)
 val set_level: type_expr -> int -> unit
 val set_scope: type_expr -> int -> unit
+val set_var_jkind: type_expr -> jkind_lr -> unit
+        (* May only be called on Tvars *)
 val set_name:
     (Path.t * type_expr list) option ref ->
     (Path.t * type_expr list) option -> unit
@@ -758,6 +1255,8 @@ val link_kind: inside:field_kind -> field_kind -> unit
 val link_commu: inside:commutable -> commutable -> unit
 val set_commu_ok: commutable -> unit
 
+val functor_param_mode : Mode.Alloc.lr
+val functor_res_mode : Mode.Alloc.lr
 
 (* Merlin specific *)
 

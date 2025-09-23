@@ -24,8 +24,8 @@ include Identifiable.S with type t := t
    - [compare] compares identifiers by binding location
 *)
 
-val doc_print: t Format_doc.printer
-val print_with_scope : t Format_doc.printer
+val print : Format.formatter -> t -> unit
+val print_with_scope : Format.formatter -> t -> unit
         (** Same as {!print} except that it will also add a "[n]" suffix
             if the scope of the argument is [n]. *)
 
@@ -34,6 +34,14 @@ val create_scoped: scope:int -> string -> t
 val create_local: string -> t
 val create_persistent: string -> t
 val create_predef: string -> t
+val create_instance: string -> Global_module.Name.argument list -> t
+val create_global: Global_module.Name.t -> t
+
+val create_local_binding_for_global: Global_module.Name.t -> t
+        (** Creates a local identifier intended to bind the value of a global
+            that is not a static constant (that is, it is a parameter or depends
+            on one). The global is used purely for the mnemonic name for
+            debugging purposes - no semantic connection to the global is kept. *)
 
 val rename: t -> t
         (** Creates an identifier with the same name as the input, a fresh
@@ -43,7 +51,6 @@ val rename: t -> t
 val name: t -> string
 val unique_name: t -> string
 val unique_toplevel_name: t -> string
-val persistent: t -> bool
 val same: t -> t -> bool
         (** Compare identifiers by binding location.
             Two identifiers are the same either if they are both
@@ -57,14 +64,19 @@ val compare_stamp: t -> t -> int
 val compare: t -> t -> int
         (** Compare identifiers structurally, including the name *)
 
-val global: t -> bool
+val is_global: t -> bool
+val is_global_or_predef: t -> bool
 val is_predef: t -> bool
+val is_instance: t -> bool
 
-val scope: t -> int
 val stamp: t -> int
+val scope: t -> int
 
 val lowest_scope : int
 val highest_scope: int
+
+val to_global: t -> Global_module.Name.t option
+val to_global_exn: t -> Global_module.Name.t
 
 val reinit: unit -> unit
 

@@ -152,12 +152,8 @@ module Runtime_coercion = struct
 
   (* Find module type at position [path] and convert the [coerce_pos] path to
      a [pos] path *)
-  let rec find env ctx path (mt:Types.module_type) = match mt, path with
-    | (Mty_ident p | Mty_alias p), _ ->
-        begin match (Env.find_modtype p env).mtd_type with
-        | None -> raise Not_found
-        | Some mt -> find env ctx path mt
-        end
+  let rec find env ctx path (mt:Types.module_type) =
+    match Mtype.scrape_alias env mt, path with
     | Mty_signature s , [] -> List.rev ctx, s
     | Mty_signature s, Item k :: q ->
         begin match runtime_item k s with
@@ -239,15 +235,9 @@ end
 
 module Err = Includemod.Error
 
-let buffer = ref Bytes.empty
-let is_big obj =
+let is_big p =
   let size = !Clflags.error_size in
-  size > 0 &&
-  begin
-    if Bytes.length !buffer < size then buffer := Bytes.create size;
-    try ignore (Marshal.to_buffer !buffer 0 size obj []); false
-    with _ -> true
-  end
+  size > 0 && Misc.is_print_longer_than size p
 
 let show_loc msg ppf loc =
   let pos = loc.Location.loc_start in
@@ -260,10 +250,139 @@ let show_locs ppf (loc1, loc2) =
 
 
 let dmodtype mty =
-  let tmty = Out_type.tree_of_modtype mty in
-  Fmt.dprintf "%a" !Oprint.out_module_type tmty
+  let tmty = Printtyp.tree_of_modtype ~abbrev:true mty in
+  Format.dprintf "%a" !Oprint.out_module_type tmty
 
 let space ppf () = Fmt.fprintf ppf "@ "
+
+
+(** Checks if the error is a mode error at the leaf node, and returns the
+  offending axis. *)
+module Is_modal = struct
+  open Err
+  let rec module_type_symptom = function
+    | Mode e ->
+       let Mode.Value.Error (ax, _) = Mode.Value.to_simple_error e in
+        Some (Mode.Value.Axis.P ax)
+    | Signature s -> signature_symptom s
+    | Functor _ | Invalid_module_alias _ | After_alias_expansion _ | Mt_core _
+      -> None
+
+  and signature_symptom {incompatibles} =
+    List.find_map (fun (_, s) -> sigitem_symptom s)
+      incompatibles
+
+  and sigitem_symptom = function
+    | Core s -> core_sigitem_symptom s
+    | Module_type d -> module_type_symptom d.symptom
+    | Module_type_declaration _ -> None
+
+  and core_sigitem_symptom = function
+    | Value_descriptions d -> value_mismatch d.symptom
+    | Class_declarations d -> class_declaration_symptom d.symptom
+    | Type_declarations _ | Extension_constructors _ | Class_type_declarations _
+    | Modalities _ -> None
+
+  and class_declaration_symptom = function
+    | Class_mode e ->
+        let Mode.Value.Error (ax, _) = Mode.Value.to_simple_error e in
+        Some (Mode.Value.Axis.P ax)
+    | Class_type _ -> None
+
+  and value_mismatch : Includecore.value_mismatch -> _ = function
+    | Mode e ->
+        let Mode.Value.Error (ax, _) = Mode.Value.to_simple_error e in
+        Some (Mode.Value.Axis.P ax)
+    | _ -> None
+end
+
+(* CR zqian: refactor to remove the following two functions *)
+let zap_axis_to_floor
+  : type a. a Mode.Value.Axis.t -> Mode.Value.l -> a
+  = fun ax m ->
+  match ax with
+  | Comonadic Areality ->
+      Mode.Regionality.zap_to_floor (Mode.Value.proj_comonadic Areality m)
+  | Comonadic Linearity ->
+      Mode.Linearity.zap_to_floor (Mode.Value.proj_comonadic Linearity m)
+  | Comonadic Portability ->
+      Mode.Portability.zap_to_floor (Mode.Value.proj_comonadic Portability  m)
+  | Comonadic Yielding ->
+      Mode.Yielding.zap_to_floor (Mode.Value.proj_comonadic Yielding m)
+  | Comonadic Statefulness ->
+      Mode.Statefulness.zap_to_floor
+        (Mode.Value.proj_comonadic Statefulness m)
+  | Monadic Uniqueness ->
+      Mode.Uniqueness.zap_to_floor (Mode.Value.proj_monadic Uniqueness m)
+  | Monadic Contention ->
+      Mode.Contention.zap_to_floor (Mode.Value.proj_monadic Contention m)
+  | Monadic Visibility ->
+      Mode.Visibility.zap_to_floor (Mode.Value.proj_monadic Visibility m)
+
+let zap_axis_to_ceil
+  : type a. a Mode.Value.Axis.t -> Mode.Value.r -> a
+  = fun ax m ->
+  match ax with
+  | Comonadic Areality ->
+      Mode.Regionality.zap_to_ceil (Mode.Value.proj_comonadic Areality m)
+  | Comonadic Linearity ->
+      Mode.Linearity.zap_to_ceil (Mode.Value.proj_comonadic Linearity m)
+  | Comonadic Portability ->
+      Mode.Portability.zap_to_ceil (Mode.Value.proj_comonadic Portability m)
+  | Comonadic Yielding ->
+      Mode.Yielding.zap_to_ceil (Mode.Value.proj_comonadic Yielding m)
+  | Comonadic Statefulness ->
+      Mode.Statefulness.zap_to_ceil (Mode.Value.proj_comonadic Statefulness m)
+  | Monadic Uniqueness ->
+      Mode.Uniqueness.zap_to_ceil (Mode.Value.proj_monadic Uniqueness m)
+  | Monadic Contention ->
+      Mode.Contention.zap_to_ceil (Mode.Value.proj_monadic Contention m)
+  | Monadic Visibility ->
+      Mode.Visibility.zap_to_ceil (Mode.Value.proj_monadic Visibility m)
+
+let print_out_mode
+: type a. ?in_structure:_ -> a Mode.Value.Axis.t -> a -> _
+= fun ?(in_structure=true) ax mode ->
+  let print = Mode.Value.Const.print_axis ax in
+  if in_structure then
+    Format.dprintf " (* in a structure at %a *)" print mode
+  else
+    Format.dprintf " (* at %a *)" print mode
+
+let maybe_print_mode_l ~is_modal (mode : Mode.Value.l) =
+  match is_modal with
+  | None -> fun _ppf -> ()
+  | Some ax ->
+      let (P ax) : Mode.Value.Axis.packed = ax in
+      let mode =
+        mode
+        (* error printing, so mutation doesn't need to be backtracked *)
+        |> zap_axis_to_floor ax
+      in
+      print_out_mode ax mode
+
+let print_modes ?in_structure ax (modes : Includemod.modes) =
+  let (P ax) : Mode.Value.Axis.packed = ax in
+  let mode1, mode2 =
+    match modes with
+    | All -> assert false
+    | Specific (mode1, mode2, _) -> mode1, mode2
+  in
+  let mode1 =
+    mode1
+    (* error printing, so mutation doesn't need to be backtracked *)
+    |> zap_axis_to_floor ax
+  in
+  let mode2 =
+    mode2
+    |> zap_axis_to_ceil ax
+  in
+  print_out_mode ?in_structure ax mode1, print_out_mode ?in_structure ax mode2
+
+let maybe_print_modes ?in_structure ~is_modal (modes : Includemod.modes) =
+  match is_modal with
+  | None -> (fun _ppf -> ()), (fun _ppf -> ())
+  | Some ax -> print_modes ?in_structure ax modes
 
 (**
    In order to display a list of functor arguments in a compact format,
@@ -347,6 +466,7 @@ module With_shorthand = struct
     | Types.Mty_alias _
     | Types.Mty_signature []
     | Types.Mty_for_hole
+    | Types.Mty_strengthen _
       -> Original r.item
     | Types.Mty_signature _ | Types.Mty_functor _
       -> Synthetic r
@@ -364,14 +484,23 @@ module With_shorthand = struct
   let pp_orig ppx = function
     | Original x | Synthetic { item=x; _ } -> ppx x
 
-  let definition x = match functor_param x with
-    | Unit -> Fmt.dprintf "()"
+  let definition_aux x = match functor_param x with
+    | Unit -> Format.dprintf "()"
     | Named(_,short_mty) ->
         match short_mty with
         | Original mty -> dmodtype mty
         | Synthetic {name; item = mty} ->
             Fmt.dprintf
               "%s@ =@ %t" name (dmodtype mty)
+
+  let definition ~is_modal x =
+    let mode =
+      Types.functor_param_mode
+      |> Mode.alloc_as_value
+      |> Mode.Value.disallow_right
+    in
+    let mode = maybe_print_mode_l ~is_modal mode in
+    Format.dprintf "%t%t" (definition_aux x) mode
 
   let param x = match functor_param x with
     | Unit -> Fmt.dprintf "()"
@@ -388,12 +517,16 @@ module With_shorthand = struct
         Fmt.dprintf "(%s : %t)"
           (Ident.name p) (pp dmodtype short_mty)
 
-  let definition_of_argument ua =
-    let arg, mty = ua.item in
+  let definition_of_argument_aux ua =
+    let arg, mty, _ = ua.item in
     match (arg: Err.functor_arg_descr) with
     | Unit -> Fmt.dprintf "()"
     | Empty_struct -> Fmt.dprintf "(struct end)"
     | Named p ->
+        let mty = match mty with
+          | Types.Mty_strengthen (mty,q,_) when Path.same p q -> mty
+          | _ -> mty
+        in
         let mty = modtype { ua with item = mty } in
         Fmt.dprintf
           "%a@ :@ %t"
@@ -407,8 +540,13 @@ module With_shorthand = struct
             Fmt.dprintf "%s@ :@ %t" name (dmodtype mty)
         end
 
-  let arg ua =
-    let arg, mty = ua.item in
+  let definition_of_argument ~is_modal ua =
+    let _, _, (mode, _locks) = ua.item in
+    let mode = maybe_print_mode_l ~is_modal mode in
+    Format.dprintf "%t%t" (definition_of_argument_aux ua) mode
+
+  let arg_aux ua =
+    let arg, mty, _ = ua.item in
     match (arg: Err.functor_arg_descr) with
     | Unit -> Fmt.dprintf "()"
     | Empty_struct -> Fmt.dprintf "(struct end)"
@@ -416,6 +554,11 @@ module With_shorthand = struct
     | Anonymous ->
         let short_mty = modtype { ua with item=mty } in
         pp dmodtype short_mty
+
+  let arg ~is_modal ua =
+    let _, _, (mode, _locks) = ua.item in
+    let mode = maybe_print_mode_l ~is_modal mode in
+    Format.dprintf "%t%t" (arg_aux ua) mode
 
 end
 
@@ -496,12 +639,12 @@ module Functor_suberror = struct
     let insert mty =
       Fmt.dprintf
         "An argument appears to be missing with module type@;<1 2>@[%t@]"
-        (With_shorthand.definition mty)
+        (With_shorthand.definition ~is_modal:None mty)
 
     let delete mty =
       Fmt.dprintf
         "An extra argument is provided of module type@;<1 2>@[%t@]"
-        (With_shorthand.definition mty)
+        (With_shorthand.definition ~is_modal:None mty)
 
       let ok x y =
         Fmt.dprintf
@@ -510,9 +653,9 @@ module Functor_suberror = struct
           (With_shorthand.param y)
 
       let diff g e more =
-        let g = With_shorthand.definition g in
-        let e = With_shorthand.definition e in
-        Fmt.dprintf
+        let g = With_shorthand.definition ~is_modal:None g in
+        let e = With_shorthand.definition ~is_modal:None e in
+        Format.dprintf
           "Module types do not match:@ @[%t@]@;<1 -2>does not include@ \
            @[%t@]%t"
           g e (more ())
@@ -537,7 +680,7 @@ module Functor_suberror = struct
       Includemod.Functor_app_diff.diff env ~f ~args
       |> prepare_patch ~drop:true ~ctx:App
 
-    let got d =
+    let got ~is_modal d =
       let extract: _ Diffing.change -> _ = function
         | Delete mty
         | Keep (mty,_,_)
@@ -545,12 +688,12 @@ module Functor_suberror = struct
             Some (None,(x,mty))
         | Insert _ -> None
       in
-      pretty_params space extract With_shorthand.arg d
+      pretty_params space extract (With_shorthand.arg ~is_modal) d
 
     let delete mty =
       Fmt.dprintf
         "The following extra argument is provided@;<1 2>@[%t@]"
-        (With_shorthand.definition_of_argument mty)
+        (With_shorthand.definition_of_argument ~is_modal:None mty)
 
     let insert = Inclusion.insert
 
@@ -562,13 +705,13 @@ module Functor_suberror = struct
       in
       Fmt.dprintf
         "Module %t matches the expected module type%t"
-        (With_shorthand.arg x)
+        (With_shorthand.arg ~is_modal:None x)
         pp_orig_name
 
-    let diff g e more =
-      let g = With_shorthand.definition_of_argument g in
-      let e = With_shorthand.definition e in
-      Fmt.dprintf
+    let diff ~is_modal g e more =
+      let g = With_shorthand.definition_of_argument ~is_modal g in
+      let e = With_shorthand.definition ~is_modal e in
+      Format.dprintf
         "Modules do not match:@ @[%t@]@;<1 -2>\
          is not included in@ @[%t@]%t"
         g e (more ())
@@ -576,16 +719,23 @@ module Functor_suberror = struct
     (** Specialized to avoid introducing shorthand names
         for single change difference
     *)
-    let single_diff g e more =
-      let _arg, mty = g.With_shorthand.item in
+    let single_diff ~is_modal g e more =
+      let _arg, mty, (mode1, locks) = g.With_shorthand.item in
+      let mode2 =
+        Types.functor_param_mode
+        |> Mode.alloc_as_value
+        |> Mode.Value.disallow_left
+      in
+      let modes : Includemod.modes = Specific (mode1, mode2, locks) in
+      let mode1, mode2 = maybe_print_modes ~is_modal modes in
       let e = match e.With_shorthand.item with
         | Types.Unit -> Fmt.dprintf "()"
         | Types.Named(_, mty) -> dmodtype mty
       in
-      Fmt.dprintf
-        "Modules do not match:@ @[%t@]@;<1 -2>\
-         is not included in@ @[%t@]%t"
-        (dmodtype mty) e (more ())
+      Format.dprintf
+        "Modules do not match:@ @[%t%t@]@;<1 -2>\
+         is not included in@ @[%t%t@]%t"
+        (dmodtype mty) mode1 e mode2 (more ())
 
 
     let incompatible = function
@@ -649,11 +799,11 @@ let with_context ?loc ctx printer diff =
 let dwith_context ?loc ctx printer =
   Location.msg ?loc "%a%t" Context.pp (List.rev ctx) printer
 
-let dwith_context_and_elision ?loc ctx printer diff =
-  if is_big (diff.got,diff.expected) then
+let dwith_context_and_elision ?loc ctx print_diff =
+  if is_big print_diff then
     Location.msg ?loc "..."
   else
-    dwith_context ?loc ctx (printer diff)
+    dwith_context ?loc ctx print_diff
 
 (* Merge sub msgs into one printer *)
 let coalesce msgs =
@@ -677,17 +827,30 @@ let subcase_list l ppf = match l with
 (* Printers for leaves *)
 let core env id x =
   match x with
+  | Err.Value_descriptions {symptom = Modality e} ->
+      Format.dprintf "@[<hv>%s:@;%a@]"
+        ("Modalities on " ^ (Ident.name id) ^ " do not match")
+        (Includecore.report_modality_sub_error "the first" "the second") e
   | Err.Value_descriptions diff ->
-      Fmt.dprintf "@[<v>@[<hv>%s:@;<1 2>%a@ %s@;<1 2>%a@]%a%a@]"
+      let is_modal = Is_modal.value_mismatch diff.symptom in
+      let mode1, mode2 = maybe_print_modes ~is_modal diff.modes in
+      Format.dprintf "@[<v>@[<hv>%s:@;<1 2>%a%t@ %s@;<1 2>%a%t@]%a%a%t@]"
         "Values do not match"
         !Oprint.out_sig_item
-        (Out_type.tree_of_value_description id diff.got)
+        (Printtyp.tree_of_value_description id diff.got)
+        mode1
         "is not included in"
         !Oprint.out_sig_item
-        (Out_type.tree_of_value_description id diff.expected)
+        (Printtyp.tree_of_value_description id diff.expected)
+        mode2
         (Includecore.report_value_mismatch
            "the first" "the second" env) diff.symptom
         show_locs (diff.got.val_loc, diff.expected.val_loc)
+        Printtyp.Conflicts.print_explanations
+  | Err.Modalities e ->
+      Format.dprintf "@[<hv>%s:@;%a@]"
+        ("Modalities on " ^ (Ident.name id) ^ " do not match")
+        (Includecore.report_modality_sub_error "the first" "the second") e
   | Err.Type_declarations diff ->
       Fmt.dprintf "@[<v>@[<hv>%s:@;<1 2>%a@ %s@;<1 2>%a@]%a%a@]"
         "Type declarations do not match"
@@ -717,17 +880,25 @@ let core env id x =
         !Oprint.out_sig_item
         (Out_type.tree_of_cltype_declaration id diff.got Trec_first)
         !Oprint.out_sig_item
-        (Out_type.tree_of_cltype_declaration id diff.expected Trec_first)
-        (Includeclass.report_error_doc Type_scheme) diff.symptom
-  | Err.Class_declarations {got;expected;symptom} ->
-      let t1 = Out_type.tree_of_class_declaration id got Trec_first in
-      let t2 = Out_type.tree_of_class_declaration id expected Trec_first in
-      Fmt.dprintf
+        (Printtyp.tree_of_cltype_declaration id diff.expected Trec_first)
+        (Includeclass.report_error Type_scheme) diff.symptom
+        Printtyp.Conflicts.print_explanations
+  | Err.Class_declarations {got;expected;symptom=Class_type reason} ->
+      let t1 = Printtyp.tree_of_class_declaration id got Trec_first in
+      let t2 = Printtyp.tree_of_class_declaration id expected Trec_first in
+      Format.dprintf
         "@[<hv 2>Class declarations do not match:@ \
          %a@;<1 -2>does not match@ %a@]@ %a"
         !Oprint.out_sig_item t1
         !Oprint.out_sig_item t2
-        (Includeclass.report_error_doc Type_scheme) symptom
+        (Includeclass.report_error Type_scheme) reason
+        Printtyp.Conflicts.print_explanations
+  | Err.Class_declarations {symptom=Class_mode e} ->
+      Format.dprintf
+        "@[<hv 2>Class declarations %s do not match:@ @]@ %a%t"
+        (Ident.name id)
+        (Includecore.report_mode_sub_error "first is" "second is") e
+        Printtyp.Conflicts.print_explanations
 
 let missing_field ppf item =
   let id, loc, kind =  Includemod.item_ident_name item in
@@ -736,31 +907,45 @@ let missing_field ppf item =
     (Style.as_inline_code Printtyp.Doc.ident) id
     (show_loc "Expected declaration") loc
 
-let module_types {Err.got=mty1; expected=mty2} =
-  Fmt.dprintf
+let module_types {Err.got=mty1; expected=mty2; modes; symptom}=
+  let is_modal = Is_modal.module_type_symptom symptom in
+  let mode1, mode2 = maybe_print_modes ~in_structure:false ~is_modal modes in
+  Format.dprintf
     "@[<hv 2>Modules do not match:@ \
-     %a@;<1 -2>is not included in@ %a@]"
-    !Oprint.out_module_type (Out_type.tree_of_modtype mty1)
-    !Oprint.out_module_type (Out_type.tree_of_modtype mty2)
+     %a%t@;<1 -2>is not included in@ %a%t@]"
+    !Oprint.out_module_type (Printtyp.tree_of_modtype ~abbrev:true mty1)
+    mode1
+    !Oprint.out_module_type (Printtyp.tree_of_modtype ~abbrev:true mty2)
+    mode2
 
-let eq_module_types {Err.got=mty1; expected=mty2} =
-  Fmt.dprintf
+let eq_module_types ({Err.got=mty1; expected=mty2} : _ mdiff) =
+  Format.dprintf
     "@[<hv 2>Module types do not match:@ \
      %a@;<1 -2>is not equal to@ %a@]"
-    !Oprint.out_module_type (Out_type.tree_of_modtype mty1)
-    !Oprint.out_module_type (Out_type.tree_of_modtype mty2)
+    !Oprint.out_module_type (Printtyp.tree_of_modtype ~abbrev:true mty1)
+    !Oprint.out_module_type (Printtyp.tree_of_modtype ~abbrev:true mty2)
 
 let module_type_declarations id {Err.got=d1 ; expected=d2} =
   Fmt.dprintf
     "@[<hv 2>Module type declarations do not match:@ \
      %a@;<1 -2>does not match@ %a@]"
-    !Oprint.out_sig_item (Out_type.tree_of_modtype_declaration id d1)
-    !Oprint.out_sig_item (Out_type.tree_of_modtype_declaration id d2)
+    !Oprint.out_sig_item (Printtyp.tree_of_modtype_declaration ~abbrev:true id d1)
+    !Oprint.out_sig_item (Printtyp.tree_of_modtype_declaration ~abbrev:true id d2)
 
 let interface_mismatch ppf (diff: _ Err.diff) =
   Fmt.fprintf ppf
     "The implementation %a@ does not match the interface %a:@ "
     Style.inline_code diff.got Style.inline_code diff.expected
+
+let parameter_mismatch ppf (diff: _ Err.diff) =
+  Format.fprintf ppf
+    "The argument module %a@ does not match the parameter signature %a:@ "
+    Style.inline_code diff.got Style.inline_code diff.expected
+
+let compilation_unit_mismatch comparison ppf diff =
+  match (comparison : Err.compilation_unit_comparison) with
+  | Implementation_vs_interface -> interface_mismatch ppf diff
+  | Argument_vs_parameter -> parameter_mismatch ppf diff
 
 let core_module_type_symptom (x:Err.core_module_type_symptom)  =
   match x with
@@ -773,7 +958,8 @@ let core_module_type_symptom (x:Err.core_module_type_symptom)  =
 
 (* Construct a linearized error message from the error tree *)
 
-let rec module_type ~expansion_token ~eqmode ~env ~before ~ctx diff =
+let rec module_type ~expansion_token ~eqmode ~env ~before ~ctx
+  (diff : _ mdiff) =
   match diff.symptom with
   | Invalid_module_alias _ (* the difference is non-informative here *)
   | After_alias_expansion _ (* we print only the expanded module types *) ->
@@ -781,6 +967,9 @@ let rec module_type ~expansion_token ~eqmode ~env ~before ~ctx diff =
         diff.symptom
   | Functor Params d -> (* We jump directly to the functor param error *)
       functor_params ~expansion_token ~env ~before ~ctx d
+  | Mode _ -> (* jump directly to the module mode mismatch, without types *)
+      module_type_symptom ~eqmode ~expansion_token ~env ~before ~ctx
+        diff.symptom
   | _ ->
       let inner = if eqmode then eq_module_types else module_types in
       let next =
@@ -791,7 +980,7 @@ let rec module_type ~expansion_token ~eqmode ~env ~before ~ctx diff =
                It is thus better to avoid eliding the current error message.
             *)
             dwith_context ctx (inner diff)
-        | _ -> dwith_context_and_elision ctx inner diff
+        | _ -> dwith_context_and_elision ctx (inner diff)
       in
       let before = next :: before in
       module_type_symptom ~eqmode ~expansion_token ~env ~before ~ctx
@@ -811,6 +1000,11 @@ and module_type_symptom ~eqmode ~expansion_token ~env ~before ~ctx = function
       let printer =
         Fmt.dprintf "Module %a cannot be aliased"
           (Style.as_inline_code Printtyp.Doc.path) path
+      in
+      dwith_context ctx printer :: before
+  | Mode e ->
+      let printer ppf =
+        Includecore.report_mode_sub_error "Got" "expected" ppf e
       in
       dwith_context ctx printer :: before
 
@@ -862,7 +1056,7 @@ and sigitem ~expansion_token ~env ~before ~ctx (name,s) = match s with
       module_type_decl ~expansion_token ~env ~before ~ctx name diff
 and module_type_decl ~expansion_token ~env ~before ~ctx id diff =
   let next =
-    dwith_context_and_elision ctx (module_type_declarations id) diff in
+    dwith_context_and_elision ctx (module_type_declarations id diff) in
   let before = next :: before in
   match diff.symptom with
   | Not_less_than mts ->
@@ -918,7 +1112,8 @@ let functor_app_diff ~expansion_token env  (patch: _ Diffing.change) =
         module_type_symptom ~eqmode:false ~expansion_token ~env ~before:[]
           ~ctx:[] mty_diff.symptom
       in
-      Functor_suberror.App.diff g e more
+      let is_modal = Is_modal.module_type_symptom mty_diff.symptom in
+      Functor_suberror.App.diff ~is_modal g e more
 
 let module_type_subst ~env id diff =
   match diff.symptom with
@@ -939,8 +1134,10 @@ let module_type_subst ~env id diff =
       [main]
 
 let all env = function
-  | In_Compilation_unit diff ->
-      let first = Location.msg "%a" interface_mismatch diff in
+  | In_Compilation_unit (comparison, diff) ->
+      let first =
+        Location.msg "%a" (compilation_unit_mismatch comparison) diff
+      in
       signature ~expansion_token:true ~env ~before:[first] ~ctx:[] diff.symptom
   | In_Type_declaration (id,reason) ->
       [Location.msg "%t" (core env id reason)]
@@ -950,6 +1147,8 @@ let all env = function
   | In_Module_type_substitution (id,diff) ->
       module_type_subst ~env id diff
   | In_Signature diff ->
+      signature ~expansion_token:true ~before:[] ~env ~ctx:[] diff
+  | In_Include_functor_signature diff ->
       signature ~expansion_token:true ~before:[] ~env ~ctx:[] diff
   | In_Expansion cmts ->
       match core_module_type_symptom cmts with
@@ -982,8 +1181,9 @@ let report_apply_error_doc ~loc env (app_name, mty_f, args) =
         module_type_symptom ~eqmode:false ~expansion_token:true ~env ~before:[]
           ~ctx:[] mty_diff.symptom
       in
-      Location.errorf ~loc ~footnote "%t"
-        (Functor_suberror.App.single_diff g e more)
+      let is_modal = Is_modal.module_type_symptom mty_diff.symptom in
+      Location.errorf ~loc "%t"
+        (Functor_suberror.App.single_diff ~is_modal g e more)
   | _ ->
       let not_functor =
         List.for_all (function _, Diffing.Delete _ -> true | _ -> false) d
@@ -1016,7 +1216,7 @@ let report_apply_error_doc ~loc env (app_name, mty_f, args) =
                 "This application of the functor %a is ill-typed."
                  (Style.as_inline_code Printtyp.Doc.longident) lid
         in
-        let actual = Functor_suberror.App.got d in
+        let actual = Functor_suberror.App.got ~is_modal:None d in
         let expected = Functor_suberror.expected d in
         let sub =
           List.rev @@

@@ -27,6 +27,7 @@ module TypeSet : sig
   val singleton: type_expr -> t
   val exists: (type_expr -> bool) -> t -> bool
   val elements: t -> type_expr list
+  val debug_print : Format.formatter -> t -> unit
 end
 module TransientTypeMap : Map.S with type key = transient_expr
 module TypeMap : sig
@@ -41,6 +42,7 @@ module TypeHash : sig
   include Hashtbl.S with type key = transient_expr
   val mem: 'a t -> type_expr -> bool
   val add: 'a t -> type_expr -> 'a -> unit
+  val replace: 'a t -> type_expr -> 'a -> unit
   val remove: 'a t -> type_expr -> unit
   val find: 'a t -> type_expr -> 'a
   val find_opt: 'a t -> type_expr -> 'a option
@@ -77,9 +79,9 @@ val newty2: level:int -> type_desc -> type_expr
 
 val newgenty: type_desc -> type_expr
         (* Create a generic type *)
-val newgenvar: ?name:string -> unit -> type_expr
+val newgenvar: ?name:string -> jkind_lr -> type_expr
         (* Return a fresh generic variable *)
-val newgenstub: scope:int -> type_expr
+val newgenstub: scope:int -> jkind_lr -> type_expr
         (* Return a fresh generic node, to be instantiated
            by [Transient_expr.set_stub_desc] *)
 
@@ -88,7 +90,8 @@ val newgenstub: scope:int -> type_expr
 val is_Tvar: type_expr -> bool
 val is_Tunivar: type_expr -> bool
 val is_Tconstr: type_expr -> bool
-val is_poly_Tpoly: type_expr -> bool
+val is_Tpoly: type_expr -> bool
+
 val dummy_method: label
 val type_kind_is_abstract: type_declaration -> bool
 val type_origin: type_declaration -> type_origin
@@ -114,12 +117,22 @@ val merge_fixed_explanation:
 
 val static_row: row_desc -> bool
         (* Return whether the row is static or not *)
+val tvariant_not_immediate: row_desc -> bool
+        (* Return whether the polymorphic variant is non-immediate
+           (i.e., has arguments or is open) *)
 val hash_variant: label -> int
         (* Hash function for variant tags *)
 
 val proxy: type_expr -> type_expr
         (* Return the proxy representative of the type: either itself
            or a row variable *)
+
+(* Poly types. *)
+
+(* These three functions can only be called on [Tpoly] nodes. *)
+val tpoly_is_mono : type_expr -> bool
+val tpoly_get_mono : type_expr -> type_expr
+val tpoly_get_poly : type_expr -> type_expr * type_expr list
 
 (**** Utilities for private abbreviations with fixed rows ****)
 val row_of_type: type_expr -> type_expr
@@ -239,7 +252,10 @@ val backtrack: snapshot -> unit
 
 (**** Utilities for labels ****)
 
+val is_optional_parsetree : Parsetree.arg_label -> bool
 val is_optional : arg_label -> bool
+val is_position : arg_label -> bool
+val is_omittable : arg_label -> bool
 val label_name : arg_label -> label
 
 (* Returns the label name with first character '?' or '~' as appropriate. *)
