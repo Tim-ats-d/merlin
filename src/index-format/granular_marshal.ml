@@ -24,7 +24,8 @@ and 'a schema = iter -> 'a -> unit
 and iter = { yield : 'a. 'a link -> 'a link Type.Id.t -> 'a schema -> unit }
 
 exception
-  Outdated_store of [ `Missing_file of string | `Index_ids_doesn't_match ]
+  Outdated_store of
+    { filename : string; reason : [ `Missing_file | `Index_ids_do_not_match ] }
 
 let schema_no_sublinks : _ schema = fun _ _ -> ()
 
@@ -74,12 +75,16 @@ let force_open_store store =
     if required_id = store.id then (
       last_open_store := Some (store, fd);
       fd)
-    else raise (Outdated_store `Index_ids_doesn't_match)
-  with Sys_error _ -> raise (Outdated_store (`Missing_file store.filename))
+    else
+      raise
+        (Outdated_store
+           { filename = store.filename; reason = `Index_ids_do_not_match })
+  with Sys_error _ ->
+    raise (Outdated_store { filename = store.filename; reason = `Missing_file })
 
 let open_store store =
   match !last_open_store with
-  | Some (store', fd) when store == store' -> fd
+  | Some (store', fd) when Int.equal store.id store'.id -> fd
   | Some (_, fd) ->
     close_in fd;
     force_open_store store
