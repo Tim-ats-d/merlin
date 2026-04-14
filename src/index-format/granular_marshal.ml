@@ -84,7 +84,9 @@ let force_open_store store =
 
 let open_store store =
   match !last_open_store with
-  | Some (store', fd) when Int.equal store.id store'.id -> fd
+  | Some (store', fd)
+    when Int.equal store.id store'.id
+         && String.equal store.filename store'.filename -> fd
   | Some (_, fd) ->
     close_in fd;
     force_open_store store
