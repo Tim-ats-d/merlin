@@ -163,7 +163,7 @@ let cache (type a) (module Key : Hashtbl.HashedType with type t = a) =
       lnk := Duplicate original_lnk
     | exception Not_found -> H.add cache key lnk
 
-let write ?(flags = []) fd id root_schema root_value =
+let write ?(flags = []) fd ~id root_schema root_value =
   let id = binstring_of_int id in
   output_string fd id;
   let pt_root = pos_out fd in

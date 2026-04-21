@@ -61,11 +61,11 @@ exception
   Outdated_store of
     { filename : string; reason : [ `Missing_file | `Index_ids_do_not_match ] }
 
-(** [write oc id schema value] writes the [value] in the output channel [oc], creating unmarshalling boundaries on every link in [value] specified by the [schema]. [id] is used as index UID. *)
+(** [write oc ~id schema value] writes the [value] in the output channel [oc], creating unmarshalling boundaries on every link in [value] specified by the [schema]. [id] is used as index UID. *)
 val write :
   ?flags:Marshal.extern_flags list ->
   out_channel ->
-  int ->
+  id:int ->
   'a schema ->
   'a ->
   unit
