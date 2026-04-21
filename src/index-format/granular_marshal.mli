@@ -70,7 +70,10 @@ val write :
   'a ->
   unit
 
-(** [read ic schema] reads the value marshalled in the input channel [ic],
+(** [read ?best_effort ic schema] reads the value marshalled in the input channel [ic],
     stopping the unmarshalling on every link boundary indicated by the [schema].
-    It returns the root [value] read.  *)
-val read : string -> in_channel -> 'a schema -> 'a
+    It returns the root [value] read.
+
+    Providing [best_effort] parameter prevents [Outdated_store] exception raising when reading outdated store.
+*)
+val read : ?best_effort:bool -> string -> in_channel -> 'a schema -> 'a
