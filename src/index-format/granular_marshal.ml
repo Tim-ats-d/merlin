@@ -27,8 +27,6 @@ exception
   Outdated_store of
     { filename : string; reason : [ `Missing_file | `Index_ids_do_not_match ] }
 
-let best_effort_mode = ref false
-
 let schema_no_sublinks : _ schema = fun _ _ -> ()
 
 let link v = ref (In_memory v)
@@ -74,7 +72,7 @@ let force_open_store store =
     let fd = open_in_bin store.filename in
     seek_in fd (String.length Config.index_magic_number);
     let required_id = int_of_binstring (really_input_string fd ptr_size) in
-    if required_id = store.id || !best_effort_mode then (
+    if required_id = store.id then (
       last_open_store := Some (store, fd);
       fd)
     else
@@ -222,12 +220,9 @@ let write ?(flags = []) fd id root_schema root_value =
   seek_out fd pt_root;
   output_string fd (binstring_of_int root_loc)
 
-let read ?(best_effort = true) filename fd root_schema =
-  let id = int_of_binstring (really_input_string fd ptr_size) in
+let read filename fd root_schema =
+  let id = int_of_binstring (really_input_string fd 8) in
   let store = { filename; id; cache = Cache_cache.read filename } in
-  let root_loc = int_of_binstring (really_input_string fd ptr_size) in
-  let prev_best_effort = !best_effort_mode in
-  best_effort_mode := best_effort;
+  let root_loc = int_of_binstring (really_input_string fd 8) in
   let root_value = read_loc store fd root_loc root_schema in
-  best_effort_mode := prev_best_effort;
   root_value
