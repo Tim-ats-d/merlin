@@ -60,7 +60,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          opam pin menhirLib 20201216 --no-action
+          opam pin menhirLib 20230608 --no-action
           opam install menhir csexp alcotest yojson conf-jq ocamlfind --yes
           opam install ppxlib ppx_string reason --yes
 
@@ -77,7 +77,7 @@ jobs:
 
 
       - name: Check that the changes are correctly formatted
-        if: matrix.os == 'none'
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          opam install ocamlformat.0.27.0
+          opam install ocamlformat.0.29.0
           opam exec -- dune build @fmt

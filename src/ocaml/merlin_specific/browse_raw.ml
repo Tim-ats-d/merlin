@@ -84,6 +84,11 @@ type node =
   | Module_binding_name of module_binding
   | Module_declaration_name of module_declaration
   | Module_type_declaration_name of module_type_declaration
+  | Class_declaration_name of class_declaration
+  | Class_type_declaration_name of class_type_declaration
+  | Class_description_name of class_description
+  | Class_field_name of class_field
+  | Exp_new_class_name of Longident.t Location.loc * Types.class_declaration
 
 let node_update_env env0 = function
   | Pattern { pat_env = env }
@@ -104,6 +109,11 @@ let node_update_env env0 = function
   | Class_signature _
   | Class_field _
   | Class_field_kind _
+  | Class_declaration_name _
+  | Class_type_declaration_name _
+  | Class_description_name _
+  | Class_field_name _
+  | Exp_new_class_name _
   | Type_extension _
   | Extension_constructor _
   | Package_type _
@@ -159,6 +169,12 @@ let node_real_loc loc0 = function
   | Class_declaration { ci_loc = loc }
   | Class_description { ci_loc = loc }
   | Class_type_declaration { ci_loc = loc }
+  | Class_declaration_name { ci_id_name = { loc } }
+  | Class_type_declaration_name { ci_id_name = { loc } }
+  | Class_description_name { ci_id_name = { loc } }
+  | Class_field_name
+      { cf_desc = Tcf_val ({ loc }, _, _, _, _) | Tcf_method ({ loc }, _, _) }
+  | Exp_new_class_name ({ loc }, _)
   | Extension_constructor { ext_loc = loc }
   | Include_description { incl_loc = loc }
   | Include_declaration { incl_loc = loc }
@@ -180,6 +196,7 @@ let node_real_loc loc0 = function
   | Type_kind _
   | Class_signature _
   | Package_type _
+  | Class_field_name _
   | Dummy -> loc0
 
 let node_attributes = function
@@ -221,8 +238,8 @@ let has_attr ~name node =
   let attrs = node_attributes node in
   List.exists
     ~f:(fun a ->
-        let str, _ = Ast_helper.Attr.as_tuple a in
-        str.Location.txt = name)
+      let str, _ = Ast_helper.Attr.as_tuple a in
+      str.Location.txt = name)
     attrs
 
 let node_merlin_loc loc0 node =
@@ -338,7 +355,7 @@ let of_pattern_desc (type k) (desc : k pattern_desc) =
   | Tpat_record (ls, _) ->
     list_fold
       (fun (lid_loc, desc, p) ->
-         of_pat_record_field p lid_loc desc ** of_pattern p)
+        of_pat_record_field p lid_loc desc ** of_pattern p)
       ls
   | Tpat_or (p1, p2, _) -> of_pattern p1 ** of_pattern p2
 
@@ -351,24 +368,24 @@ let of_method_call obj meth loc env (f : _ f0) acc =
 let rec of_expression_desc loc = function
   | Texp_ident _ | Texp_constant _ | Texp_instvar _
   | Texp_variant (_, None)
-  | Texp_new _ | Texp_typed_hole -> id_fold
+  | Texp_typed_hole -> id_fold
+  | Texp_new (_, lid, decl) -> app (Exp_new_class_name (lid, decl))
   | Texp_let (_, vbs, e) -> of_expression e ** list_fold of_value_binding vbs
   | Texp_function (params, body) ->
     list_fold of_function_param params ** of_function_body body
   | Texp_apply (e, ls) ->
     of_expression e
     ** list_fold
-      (function
-        | _, Omitted () -> id_fold
-        | _, Arg e -> of_expression e)
-      ls
+         (function
+           | _, Omitted () -> id_fold
+           | _, Arg e -> of_expression e)
+         ls
   | Texp_match (e, cs, vs, _) ->
     of_expression e ** list_fold of_case cs ** list_fold of_case vs
   | Texp_try (e, cs, _) -> of_expression e ** list_fold of_case cs
   | Texp_tuple es ->
     list_fold of_expression (List.map ~f:snd es) (* todo labels ? *)
-  | Texp_construct (_, _, es) | Texp_array (_, es) ->
-    list_fold of_expression es
+  | Texp_construct (_, _, es) | Texp_array (_, es) -> list_fold of_expression es
   | Texp_variant (_, Some e)
   | Texp_assert (e, _)
   | Texp_lazy e
@@ -545,8 +562,8 @@ and of_core_type_desc = function
   | Ttyp_object (cts, _) ->
     list_fold
       (fun of_ ->
-         match of_.of_desc with
-         | OTtag (_, ct) | OTinherit ct -> of_core_type ct)
+        match of_.of_desc with
+        | OTtag (_, ct) | OTinherit ct -> of_core_type ct)
       cts
   | Ttyp_poly (_, ct) | Ttyp_alias (ct, _) -> of_core_type ct
   | Ttyp_variant (rfs, _, _) -> list_fold (fun rf -> app (Row_field rf)) rfs
@@ -587,7 +604,8 @@ let of_node = function
   | Class_expr { cl_desc } -> of_class_expr_desc cl_desc
   | Class_structure { cstr_self; cstr_fields } ->
     of_pattern cstr_self ** list_fold (fun f -> app (Class_field f)) cstr_fields
-  | Class_field { cf_desc } -> of_class_field_desc cf_desc
+  | Class_field ({ cf_desc } as cf) ->
+    of_class_field_desc cf_desc ** app (Class_field_name cf)
   | Class_field_kind (Tcfk_virtual ct) -> of_core_type ct
   | Class_field_kind (Tcfk_concrete (_, e)) -> of_expression e
   | Module_expr { mod_desc } -> of_module_expr_desc mod_desc
@@ -596,9 +614,9 @@ let of_node = function
   | Structure { str_items; str_final_env } ->
     list_fold_with_next
       (fun next item ->
-         match next with
-         | None -> app (Structure_item (item, str_final_env))
-         | Some item' -> app (Structure_item (item, item'.str_env)))
+        match next with
+        | None -> app (Structure_item (item, str_final_env))
+        | Some item' -> app (Structure_item (item, item'.str_env)))
       str_items
   | Structure_item ({ str_desc }, _) -> of_structure_item_desc str_desc
   | Module_binding mb ->
@@ -609,9 +627,9 @@ let of_node = function
   | Signature { sig_items; sig_final_env } ->
     list_fold_with_next
       (fun next item ->
-         match next with
-         | None -> app (Signature_item (item, sig_final_env))
-         | Some item' -> app (Signature_item (item, item'.sig_env)))
+        match next with
+        | None -> app (Signature_item (item, sig_final_env))
+        | Some item' -> app (Signature_item (item, item'.sig_env)))
       sig_items
   | Signature_item ({ sig_desc }, _) -> of_signature_item_desc sig_desc
   | Module_declaration md ->
@@ -627,10 +645,10 @@ let of_node = function
   | Core_type { ctyp_desc } -> of_core_type_desc ctyp_desc
   | Package_type { tpt_cstrs } ->
     list_fold (fun (_, ct) -> of_core_type ct) tpt_cstrs
-  | Row_field rf -> begin
-      match rf.rf_desc with
-      | Ttag (_, _, cts) -> list_fold of_core_type cts
-      | Tinherit ct -> of_core_type ct
+  | Row_field rf ->
+    begin match rf.rf_desc with
+    | Ttag (_, _, cts) -> list_fold of_core_type cts
+    | Tinherit ct -> of_core_type ct
     end
   | Value_description { val_desc } -> of_core_type val_desc
   | Type_declaration { typ_params; typ_cstrs; typ_kind; typ_manifest } ->
@@ -657,17 +675,28 @@ let of_node = function
     of_core_type csig_self
     ** list_fold (fun x -> app (Class_type_field x)) csig_fields
   | Class_type_field { ctf_desc } -> of_class_type_field_desc ctf_desc
-  | Class_declaration { ci_params; ci_expr } ->
-    app (Class_expr ci_expr) ** list_fold of_typ_param ci_params
-  | Class_description { ci_params; ci_expr } ->
-    app (Class_type ci_expr) ** list_fold of_typ_param ci_params
-  | Class_type_declaration { ci_params; ci_expr } ->
-    app (Class_type ci_expr) ** list_fold of_typ_param ci_params
+  | Class_declaration ({ ci_params; ci_expr } as cd) ->
+    app (Class_expr ci_expr)
+    ** list_fold of_typ_param ci_params
+    ** app (Class_declaration_name cd)
+  | Class_description ({ ci_params; ci_expr } as cd) ->
+    app (Class_type ci_expr)
+    ** list_fold of_typ_param ci_params
+    ** app (Class_description_name cd)
+  | Class_type_declaration ({ ci_params; ci_expr } as ctd) ->
+    app (Class_type ci_expr)
+    ** list_fold of_typ_param ci_params
+    ** app (Class_type_declaration_name ctd)
   | Method_call _ -> id_fold
   | Record_field _ -> id_fold
   | Module_binding_name _ -> id_fold
   | Module_declaration_name _ -> id_fold
   | Module_type_declaration_name _ -> id_fold
+  | Class_declaration_name _ -> id_fold
+  | Class_type_declaration_name _ -> id_fold
+  | Class_description_name _ -> id_fold
+  | Class_field_name _ -> id_fold
+  | Exp_new_class_name _ -> id_fold
   | Open_description _ -> id_fold
   | Open_declaration od -> app (Module_expr od.open_expr)
   | Include_declaration i -> of_module_expr i.incl_mod
@@ -724,6 +753,11 @@ let string_of_node = function
   | Module_binding_name _ -> "module_binding_name"
   | Module_declaration_name _ -> "module_declaration_name"
   | Module_type_declaration_name _ -> "module_type_declaration_name"
+  | Class_declaration_name _ -> "class_declaration_name"
+  | Class_type_declaration_name _ -> "class_type_declaration_name"
+  | Class_description_name _ -> "class_description_name"
+  | Class_field_name _ -> "class_field_name"
+  | Exp_new_class_name _ -> "exp_new_class_name"
   | Open_description _ -> "open_description"
   | Open_declaration _ -> "open_declaration"
   | Include_description _ -> "include_description"
@@ -789,7 +823,7 @@ let expression_paths { Typedtree.exp_desc; exp_extra; _ } =
     | Texp_override (_, ps) ->
       List.map
         ~f:(fun (id, loc, _) ->
-            (reloc (Path.Pident id) loc, Some (Longident.Lident loc.txt)))
+          (reloc (Path.Pident id) loc, Some (Longident.Lident loc.txt)))
         ps
     | Texp_letmodule (Some id, loc, _, _, _) ->
       [ (reloc (Path.Pident id) loc, Option.map ~f:mk_lident loc.txt) ]
@@ -836,7 +870,7 @@ let structure_item_paths { Typedtree.str_desc } =
   | Tstr_class_type cls ->
     List.map
       ~f:(fun (id, loc, _) ->
-          (reloc (Path.Pident id) loc, Some (Longident.Lident loc.txt)))
+        (reloc (Path.Pident id) loc, Some (Longident.Lident loc.txt)))
       cls
   | Tstr_open od -> module_expr_paths od.open_expr
   | _ -> []
@@ -910,8 +944,8 @@ let node_paths_full =
 let node_paths t = List.map (node_paths_full t) ~f:fst
 let node_paths_and_longident t =
   List.filter_map (node_paths_full t) ~f:(function
-      | _, None -> None
-      | p, Some lid -> Some (p, lid))
+    | _, None -> None
+    | p, Some lid -> Some (p, lid))
 
 let node_is_constructor = function
   | Constructor_declaration decl ->

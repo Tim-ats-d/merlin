@@ -1,5 +1,6 @@
-unreleased
-==========
+merlin 5.7.0-504
+================
+Thu Apr 09 09:59:38 WAT 2026
 
   + merlin library
     - Implement new refactor-extract-region command for extracting region to a fresh let binding (warning: this feature is still experimental) (#1948)
@@ -10,9 +11,11 @@ unreleased
     - Fix bugs on signature help about labelled and optional parameters (#2032)
     - Add `-end-position` parameter for `enclosing` (#2029)
     - Signature help should appear even if the 'in' is not written (#2036)
+    - Improve type enclosing behavior on various class and object related items
+      (#2053)
   + merlin binary
     - Define PATH_MAX to 4096 if undefined (eg. hurd) (#2039)
-  + tests
+  + test suite
     - Add a reproduction case for #1214, the issue has been resolved before (#2022)
     - Add reproduction case for #1763 but it is not failing anymore (#2021)
     - Add a test to reproduce [Locate command fails on multi-line type definitions](#1987) (#2020)
@@ -21,6 +24,7 @@ unreleased
     - Implemente a pointer to another index file: a new optimization of how ocaml-index builds index files. The resulting index files should take up less disk space (#2051)
 
 merlin 5.6.1
+============
 Sat Dec 20 11:15:42 CET 2025
 
   + merlin binary
@@ -39,6 +43,7 @@ Sat Dec 20 11:15:42 CET 2025
     - Signature-help should trigger on unfinished `let ... in` bindings (#2009)
 
 merlin 5.6
+==========
 Sat Oct 04 15:10:42 CEST 2025
 
   + merlin binary
