@@ -62,7 +62,7 @@ An error is expected, a pointer references an index file, but it doesn't exist a
   [1]
   $ mv index-files test_sig.ocaml-index
 
-An error is expected, a pointer references an index file that is considered outdated because we rebuild it:
+An error is expected, a pointer references an index file that is considered outdated because we rebuilt it:
 
   $ ocaml-index aggregate test.cmti test.cmt sig.cmti sig.cmt --root . --rewrite-root -o test_sig.ocaml-index
   $ ocaml-index dump project.ocaml-index
