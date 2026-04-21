@@ -177,7 +177,11 @@ let get_external_locs ~(config : Mconfig.t) ~current_buffer_path uid :
           let external_index = Index_cache.read index_file in
           Index_format.Uid_map.find_opt uid external_index.defs
           |> Option.map ~f:(fun uid_locs -> (external_index, uid_locs))
-        with Index_format.Not_an_index _ | Sys_error _ ->
+        with
+        | Index_format.Not_an_index _
+        | Sys_error _
+        | Granular_marshal.Outdated_store _
+        ->
           log ~title "Could not load index %s" index_file;
           None
       in
@@ -225,7 +229,11 @@ let lookup_related_uids_in_indexes ~(config : Mconfig.t) uid =
             Uid_map.union
               (fun _ a b -> Some (Union_find.union a b))
               index.related_uids acc
-          with Index_format.Not_an_index _ | Sys_error _ ->
+          with
+          | Index_format.Not_an_index _
+          | Sys_error _
+          | Granular_marshal.Outdated_store _
+            ->
             log ~title "Could not load index %s" index_file;
             acc)
   in
