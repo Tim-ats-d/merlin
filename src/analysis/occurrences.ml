@@ -226,18 +226,18 @@ let lookup_related_uids_in_indexes ~(config : Mconfig.t) uid =
   let related_uids =
     List.fold_left ~init:(Uid_map.empty ()) config.merlin.index_files
       ~f:(fun acc index_file ->
-          try
-            let index = Index_cache.read index_file in
-            Uid_map.union
-              (fun _ a b -> Some (Union_find.union a b))
-              index.related_uids acc
-          with
-          | Index_format.Not_an_index _
-          | Sys_error _
-          | Granular_marshal.Outdated_store _
-            ->
-            log ~title "Could not load index %s" index_file;
-            acc)
+        try
+          let index = Index_cache.read index_file in
+          Uid_map.union
+            (fun _ a b -> Some (Union_find.union a b))
+            index.related_uids acc
+        with
+        | Index_format.Not_an_index _
+        | Sys_error _
+        | Granular_marshal.Outdated_store _
+        ->
+          log ~title "Could not load index %s" index_file;
+          acc)
   in
   Uid_map.find_opt uid related_uids
   |> Option.value_map ~default:[] ~f:(fun x ->
