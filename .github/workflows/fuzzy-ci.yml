@@ -133,7 +133,12 @@ jobs:
       - name: Install opam monorepo
         if: steps.irmin-cache.outputs.cache-hit != 'true'
         run: opam install opam-monorepo --yes
-
+      
+      - name: Debug
+        run: |
+          git status
+          git diff --function-context
+        
       - name: Pull in Irmin's dependencies
         if: steps.irmin-cache.outputs.cache-hit != 'true'
         run: |
