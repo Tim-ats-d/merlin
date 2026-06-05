@@ -1,5 +1,9 @@
 open Std
+
+let _ = 10
+
 open Typedtree
+
 
 let { Logger.log } = Logger.for_section "iterators"
 
