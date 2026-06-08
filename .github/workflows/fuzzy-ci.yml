@@ -126,7 +126,7 @@ jobs:
       - name: Get Irmin's lock files
         if: steps.irmin-cache.outputs.cache-hit != 'true'
         run: |
-          cp .github/fuzzy-ci-helpers/irmin.3.10.0.opam.locked irmin/irmin.opam.locked
+          cp .github/fuzzy-ci-helpers/irmin.3.11.0.opam.locked irmin/irmin.opam.locked
 
       - name: Install opam monorepo
         if: steps.irmin-cache.outputs.cache-hit != 'true'
