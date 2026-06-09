@@ -182,7 +182,7 @@ jobs:
           # `--queries`: The `ocamlmerlin` queries that are being run.
           opam exec -- merl-an behavior \
           --queries=type-enclosing,occurrences,locate,complete-prefix,errors \
-          --sample-size=30 \
+          --per-file-samples=30 \
           --data=${{ env.data_dir }} \
           --merlin=ocamlmerlin \
           --project=irmin/src/irmin,irmin/src/irmin-pack,irmin/test/irmin-pack
