@@ -159,19 +159,19 @@ jobs:
           opam exec -- dune build @check
         working-directory: irmin
 
-      # - name: Pull merl-an from cache if possible
-      #   uses: actions/cache@v4
-      #   id: merl-an-cache
-      #   with:
-      #     path: /usr/local/bin/merl-an
-      #     key: os${{ runner.os }}+arch${{ runner.arch }}+merl-an
+      - name: Pull merl-an from cache if possible
+        uses: actions/cache@v4
+        id: merl-an-cache
+        with:
+          path: /usr/local/bin/merl-an
+          key: os${{ runner.os }}+arch${{ runner.arch }}+merl-an
 
       - name: Install merl-an
-        # if: steps.merl-an-cache.outputs.cache-hit != 'true'
+        if: steps.merl-an-cache.outputs.cache-hit != 'true'
         run: opam pin -y merl-an https://github.com/tarides/merl-an.git
 
       - name: Add merl-an to /usr/local/bin/
-        # if: steps.merl-an-cache.outputs.cache-hit != 'true'
+        if: steps.merl-an-cache.outputs.cache-hit != 'true'
         run: opam exec -- cp $GITHUB_WORKSPACE/_opam/bin/merl-an /usr/local/bin/merl-an
 
       - name: Create data set of Merlin responses
