@@ -1,3 +1,15 @@
+merlin 5.8
+==========
+Tue Jun 23 12:15:42 CEST 2026
+
+  + merlin library
+    - Support for OCaml 5.5 (#2077, fixes #2024)
+    - Fix signature-help with type aliases (#2067, fixes #1927)
+    - Fix locate on punned let bindings, to use the common identifier as the
+      expression (instead of the pattern) (#2066)
+  + test suite
+    - Remove the FIXME line for #1404 as the issue was already fixed and add two tests (#2073).
+
 merlin 5.7.1
 ============
 Thu Apr 30 14:15:42 CEST 2026

@@ -352,7 +352,7 @@ let load_cmt ~config ?(with_fallback = true) comp_unit =
   match Utils.find_file ~config:config.mconfig ~with_fallback file with
   | Some path ->
     log ~title "Found %S at path %S" comp_unit path;
-    let cmt_infos = (Cmt_cache.read path).cmt_infos in
+    let cmt_infos = Cmt_cache.read path in
     let source_file = cmt_infos.cmt_sourcefile in
     let source_file = Option.value ~default:"*pack*" source_file in
     move_to config.mconfig path cmt_infos;
@@ -595,7 +595,8 @@ let lookup_uid_decl ~config:mconfig uid =
   let title = "lookup_uid_decl" in
   let item =
     match uid with
-    | Shape.Uid.Internal | Predef _ | Compilation_unit _ -> None
+    | Shape.Uid.Internal | Predef _ | Compilation_unit _ | Local_opaque_item _
+      -> None
     | Item { from = Intf; comp_unit; _ } -> Some (`MLI, comp_unit)
     | Item { from = _; comp_unit; _ } -> Some (`ML, comp_unit)
   in
@@ -662,7 +663,8 @@ let find_loc_of_uid ~config ~local_defs ?ident ?fallback (uid : Shape.Uid.t) =
   match uid with
   | Predef s -> `Builtin (uid, s)
   | Internal -> `Builtin (uid, "<internal>")
-  | Item { comp_unit; _ } -> `Opt (find_loc_of_item ~comp_unit)
+  | Local_opaque_item { comp_unit; _ } | Item { comp_unit; _ } ->
+    `Opt (find_loc_of_item ~comp_unit)
   | Compilation_unit comp_unit -> find_loc_of_comp_unit ~config uid comp_unit
 
 let get_linked_uids ~config ~comp_unit decl_uid =
@@ -713,7 +715,7 @@ let find_definition_uid ~config ~env ~(decl : Env_lookup.item) path =
   reduced
 
 let rec uid_of_result ~traverse_aliases = function
-  | Shape_reduce.Resolved uid -> (Some uid, false)
+  | Shape_reduce.Resolved uid | Resolved_local_use uid -> (Some uid, false)
   | Resolved_alias
       ( (Item { comp_unit; _ } | Compilation_unit comp_unit),
         (( Resolved_alias (Compilation_unit comp_unit', _)
@@ -729,7 +731,8 @@ let rec uid_of_result ~traverse_aliases = function
   | Resolved_alias (alias, _rest) -> (Some alias, false)
   | Unresolved { uid = Some uid; desc = Comp_unit _; approximated } ->
     (Some uid, approximated)
-  | Approximated _ | Unresolved _ | Internal_error_missing_uid -> (None, true)
+  | Approximated _ | Unresolved _ | Internal_error_missing_uid | Missing_uid _
+    -> (None, true)
 
 (** This is the main function here *)
 let from_path ~config ~env ~local_defs ~decl ?ident:_ path =
@@ -844,9 +847,11 @@ let infer_namespace ?namespaces ~pos lid browse is_label =
         "input is clearly a label, but the given namespaces don't cover that";
       `Error `Missing_labels_namespace)
   | None -> (
-    match
-      (Context.inspect_browse_tree ~cursor:pos lid [ browse ], is_label)
-    with
+    let context =
+      let disambiguate = Mbrowse.Tie_breaker.prefer_expression in
+      Context.inspect_browse_tree ~disambiguate ~cursor:pos lid [ browse ]
+    in
+    match (context, is_label) with
     | None, _ ->
       log ~title:"from_string" "already at origin, doing nothing";
       `Error `At_origin
@@ -986,7 +991,7 @@ let doc_from_comment_list ~after_only ~buffer_comments loc =
       buffer_comments
     | Some cmt_path ->
       log ~title:"get_doc" "File switching: actually in %s" cmt_path;
-      let { Cmt_cache.cmt_infos; _ } = Cmt_cache.read cmt_path in
+      let cmt_infos = Cmt_cache.read cmt_path in
       cmt_infos.Cmt_format.cmt_comments
   in
   log ~title:"get_doc" "%a" Logger.fmt (fun fmt ->
