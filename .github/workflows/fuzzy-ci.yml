@@ -65,7 +65,7 @@ jobs:
         commit: ["merge_branch", "base_branch"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -104,7 +104,7 @@ jobs:
           opam exec -- dune install -p merlin-lib,dot-merlin-reader,merlin
 
       - name: Pull irmin and its deps from cache if possible
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         id: irmin-cache
         with:
           path: irmin/
@@ -160,7 +160,7 @@ jobs:
         working-directory: irmin
 
       - name: Pull merl-an from cache if possible
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         id: merl-an-cache
         with:
           path: /usr/local/bin/merl-an
@@ -307,7 +307,7 @@ jobs:
       diff_dir: ${{ needs.artifact_names.outputs.diff_dir }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download current diff(s)
         if: ${{ env.current_diff_exists == 'true' }}
